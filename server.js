@@ -173,35 +173,100 @@ function sfNum(row, field) {
   return num(row[field]);
 }
 
-function buildDemand(state, month, code) {
-  const { items } = loadCalculator(state, month);
-  const rawItem = items.find((it) => String(it.InventoryCode) === code);
-  if (!rawItem) {
-    const err = new Error(`Item ${code} not in ${state} ${month} calculator`);
-    err.status = 404;
-    throw err;
+function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, priorMonthId }) {
+  let wDays = 0;
+  let w = 0;
+  let wNowMatched = 0;
+  let wPriorDays = 0;
+  let wPrior = 0;
+  const byProduct = [];
+  const movers = [];
+  for (const p of products) {
+    const info = productIndex[p.id];
+    if (!info) continue;
+    let pw = 0;
+    let pDays = 0;
+    let pPriorDays = 0;
+    let pPriorW = 0;
+    for (const rec of info.rows) {
+      const outLm = sfNum(rec, `Forecast Month${peakIdx}_c_TotalLM`);
+      if (outLm <= 0) continue;
+      const units = outLm * p.rate;
+      const days = num(rec.CompanyProduct_cv_AvgDays);
+      if (days <= 0) continue;
+      const company = String(rec["CompanyProduct_Company Name"] || "Unknown");
+      const priorRec = priorIx[`${company}|${p.id}`];
+      const priorDays = priorRec ? num(priorRec.CompanyProduct_cv_AvgDays) : 0;
+      w += units;
+      wDays += days * units;
+      pw += units;
+      pDays += days * units;
+      if (priorDays > 0) {
+        wPrior += units;
+        wNowMatched += days * units;
+        wPriorDays += priorDays * units;
+        pPriorW += units;
+        pPriorDays += priorDays * units;
+        const delta = days - priorDays;
+        if (Math.abs(delta) >= 1) {
+          movers.push({
+            company,
+            product: p.code || p.id,
+            days,
+            priorDays,
+            delta,
+            units,
+            extraUnits: units * (delta / priorDays),
+          });
+        }
+      }
+    }
+    const daysNow = pw ? pDays / pw : 0;
+    const daysWas = pPriorW ? pPriorDays / pPriorW : null;
+    byProduct.push({
+      code: p.code,
+      name: p.name,
+      days: daysNow,
+      priorDays: daysWas,
+      delta: daysWas != null ? daysNow - daysWas : null,
+      units: pw,
+    });
   }
-  const item = mapRow(rawItem, state);
-  const rates = parseQtyPerM(rawItem[`${state}_QtyPerM_JSON`]);
-  const productIds = Object.keys(rates).filter((id) => num(rates[id]) > 0);
+  const current = w ? wDays / w : 0;
+  const compared = wPrior ? wNowMatched / wPrior : null;
+  const prior = wPrior ? wPriorDays / wPrior : null;
+  const delta = compared != null && prior != null ? compared - prior : null;
+  const wd = num(peak.workingDays) || 21;
+  const extraUnits = delta != null && wd > 0 ? (peak.outUnits || 0) * (delta / wd) : 0;
+  let direction = "stable";
+  if (delta != null && Math.abs(delta) >= 0.5) direction = delta > 0 ? "longer" : "shorter";
+  const longer = movers.filter((m) => m.delta > 0).sort((a, b) => b.extraUnits - a.extraUnits).slice(0, 8);
+  const shorter = movers.filter((m) => m.delta < 0).sort((a, b) => a.extraUnits - b.extraUnits).slice(0, 8);
+  return {
+    priorMonth: priorMonthId,
+    current,
+    compared,
+    prior,
+    delta,
+    deltaPct: prior ? (delta / prior) * 100 : null,
+    direction,
+    extraUnits,
+    weightUnits: w,
+    comparedUnits: wPrior,
+    workingDays: wd,
+    byProduct,
+    longer,
+    shorter,
+  };
+}
 
-  let priorRates = {};
-  try {
-    const prior = loadCalculator(state, prevMonth(month));
-    const prevItem = prior.items.find((it) => String(it.InventoryCode) === code);
-    if (prevItem) priorRates = parseQtyPerM(prevItem[`${state}_QtyPerM_JSON`]);
-  } catch {
-    priorRates = {};
-  }
-
-  const { records, metadata, file: sfFile } = loadSalesForecast(state, month);
+function indexSalesForecast(records) {
   const first = records[0] || {};
   const monthMeta = [1, 2, 3, 4].map((i) => ({
     index: i,
     date: String(first[`CompanyProduct_g_ForecastDate${i}`] || ""),
     workingDays: num(first[`CompanyProduct_g_WorkingDays${i}`]),
   }));
-
   const productIndex = {};
   for (const rec of records) {
     const id = String(rec.CompanyProduct__ProductID ?? "");
@@ -215,27 +280,56 @@ function buildDemand(state, month, code) {
     }
     productIndex[id].rows.push(rec);
   }
+  return { monthMeta, productIndex };
+}
 
+function productMonthCache(productIndex, monthMeta) {
+  const cache = {};
+  for (const [id, info] of Object.entries(productIndex)) {
+    cache[id] = monthMeta.map((m) => {
+      let outLm = 0;
+      let netLm = 0;
+      let hires = 0;
+      for (const r of info.rows) {
+        outLm += sfNum(r, `Forecast Month${m.index}_c_TotalLM`);
+        netLm += sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`);
+        hires += sfNum(r, `Forecast Month${m.index}_NoOfHires`);
+      }
+      return { outLm, netLm, hires, inLm: outLm - netLm };
+    });
+  }
+  return cache;
+}
+
+function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, monthCache) {
+  const item = mapRow(rawItem, state);
+  const rates = parseQtyPerM(rawItem[`${state}_QtyPerM_JSON`]);
+  const productIds = Object.keys(rates).filter((id) => num(rates[id]) > 0);
   const products = productIds.map((id) => {
     const info = productIndex[id] || { id, code: "", name: `Product ${id}`, rows: [] };
     const rate = num(rates[id]);
     const prior = num(priorRates[id]);
-    const months = monthMeta.map((m) => {
-      const outLm = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_c_TotalLM`), 0);
-      const netLm = info.rows.reduce((s, r) => s + sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`), 0);
-      const hires = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_NoOfHires`), 0);
-      const inLm = outLm - netLm;
+    const cached = monthCache && monthCache[id];
+    const months = monthMeta.map((m, i) => {
+      const tot = cached
+        ? cached[i]
+        : (() => {
+            const outLm = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_c_TotalLM`), 0);
+            const netLm = info.rows.reduce((s, r) => s + sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`), 0);
+            const hires = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_NoOfHires`), 0);
+            return { outLm, netLm, hires, inLm: outLm - netLm };
+          })();
       return {
         index: m.index,
         date: m.date,
         workingDays: m.workingDays,
-        hires,
-        outLm,
-        inLm,
-        netLm,
-        outUnits: outLm * rate,
-        inUnits: inLm * rate,
-        netUnits: netLm * rate,
+        hires: tot.hires,
+        outLm: tot.outLm,
+        inLm: tot.inLm,
+        netLm: tot.netLm,
+        outUnits: tot.outLm * rate,
+        inUnits: tot.inLm * rate,
+        netUnits: tot.netLm * rate,
       };
     });
     return {
@@ -249,7 +343,6 @@ function buildDemand(state, month, code) {
       months,
     };
   });
-
   const months = monthMeta.map((m) => {
     const slice = {
       index: m.index,
@@ -275,13 +368,133 @@ function buildDemand(state, month, code) {
     }
     return slice;
   });
-
   let running = item.inService;
   const trajectory = months.map((m) => {
     running += m.netUnits;
     return { ...m, projectedInService: running };
   });
   const peak = trajectory.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), trajectory[0] || { index: 1, outUnits: 0 });
+  const required = item.targetUtil > 0 ? Math.ceil(item.forecastMax / item.targetUtil) : item.forecastMax;
+  const cover = item.totalStock + item.currentOrders;
+  return {
+    item,
+    products,
+    months: trajectory,
+    peakMonth: peak,
+    required,
+    cover,
+    shortfall: required - cover,
+  };
+}
+
+function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, monthCache) {
+  const familyItems = items.filter((it) => String(it.Family || "") === familyName && String(it.InventoryCode || ""));
+  const parts = familyItems.map((it) => computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache));
+  const months = monthMeta.map((m, i) => {
+    const slice = {
+      index: m.index,
+      date: m.date,
+      workingDays: m.workingDays,
+      hires: 0,
+      outLm: 0,
+      inLm: 0,
+      netLm: 0,
+      outUnits: 0,
+      inUnits: 0,
+      netUnits: 0,
+      projectedInService: 0,
+    };
+    for (const p of parts) {
+      const pm = p.months[i] || {};
+      slice.outUnits += pm.outUnits || 0;
+      slice.inUnits += pm.inUnits || 0;
+      slice.netUnits += pm.netUnits || 0;
+      slice.projectedInService += pm.projectedInService || 0;
+    }
+    return slice;
+  });
+  const peak = months.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), months[0] || { index: 1, outUnits: 0 });
+  const forecastMax = parts.reduce((s, p) => s + p.item.forecastMax, 0);
+  const required = parts.reduce((s, p) => s + p.required, 0);
+  const cover = parts.reduce((s, p) => s + p.cover, 0);
+  const inService = parts.reduce((s, p) => s + p.item.inService, 0);
+  const totalStock = parts.reduce((s, p) => s + p.item.totalStock, 0);
+  const currentOrders = parts.reduce((s, p) => s + p.item.currentOrders, 0);
+  const orderQty = parts.reduce((s, p) => s + p.item.orderQty, 0);
+  const orderCost = parts.reduce((s, p) => s + p.item.orderCost, 0);
+  const members = parts
+    .map((p) => ({
+      code: p.item.code,
+      name: p.item.name,
+      forecastMax: p.item.forecastMax,
+      required: p.required,
+      cover: p.cover,
+      shortfall: p.shortfall,
+      orderQty: p.item.orderQty,
+      orderCost: p.item.orderCost,
+      inService: p.item.inService,
+      totalStock: p.item.totalStock,
+      peakOut: p.peakMonth.outUnits || 0,
+    }))
+    .sort((a, b) => b.orderCost - a.orderCost || b.peakOut - a.peakOut);
+  return {
+    name: familyName,
+    itemCount: parts.length,
+    orderLines: members.filter((m) => m.orderQty > 0).length,
+    forecastMax,
+    required,
+    cover,
+    shortfall: required - cover,
+    inService,
+    totalStock,
+    currentOrders,
+    orderQty,
+    orderCost,
+    months,
+    peakMonth: peak,
+    members,
+  };
+}
+
+function buildDemand(state, month, code) {
+  const { items } = loadCalculator(state, month);
+  const rawItem = items.find((it) => String(it.InventoryCode) === code);
+  if (!rawItem) {
+    const err = new Error(`Item ${code} not in ${state} ${month} calculator`);
+    err.status = 404;
+    throw err;
+  }
+
+  let priorRates = {};
+  try {
+    const prior = loadCalculator(state, prevMonth(month));
+    const prevItem = prior.items.find((it) => String(it.InventoryCode) === code);
+    if (prevItem) priorRates = parseQtyPerM(prevItem[`${state}_QtyPerM_JSON`]);
+  } catch {
+    priorRates = {};
+  }
+
+  const { records, metadata, file: sfFile } = loadSalesForecast(state, month);
+  let priorRecords = [];
+  const priorMonthId = prevMonth(month);
+  try {
+    priorRecords = loadSalesForecast(state, priorMonthId).records;
+  } catch {
+    priorRecords = [];
+  }
+  const priorIx = {};
+  for (const rec of priorRecords) {
+    const k = `${rec["CompanyProduct_Company Name"] || ""}|${String(rec.CompanyProduct__ProductID ?? "")}`;
+    priorIx[k] = rec;
+  }
+  const { monthMeta, productIndex } = indexSalesForecast(records);
+  const monthCache = productMonthCache(productIndex, monthMeta);
+  const computed = computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, monthCache);
+  const item = computed.item;
+  const products = computed.products;
+  const trajectory = computed.months;
+  const peak = computed.peakMonth;
+  const familyDemand = buildFamilyDemand(items, state, item.family, monthMeta, productIndex, monthCache);
 
   const peakIdx = peak.index || 1;
   const companyMap = {};
@@ -297,6 +510,8 @@ function buildDemand(state, month, code) {
           avgDays: 0,
           avgQty: 0,
           daysWeight: 0,
+          priorDays: 0,
+          priorDaysWeight: 0,
           hires: 0,
           outLm: 0,
           netLm: 0,
@@ -317,6 +532,13 @@ function buildDemand(state, month, code) {
         companyMap[key].avgDays += days * outLm;
         companyMap[key].avgQty += qty * outLm;
         companyMap[key].daysWeight += outLm;
+        const pk = `${key}|${p.id}`;
+        const priorRec = priorIx[`${key}|${p.id}`];
+        const priorDays = priorRec ? num(priorRec.CompanyProduct_cv_AvgDays) : 0;
+        if (priorDays > 0) {
+          companyMap[key].priorDays += priorDays * outLm;
+          companyMap[key].priorDaysWeight += outLm;
+        }
       }
       companyMap[key].products[p.code || p.id] = (companyMap[key].products[p.code || p.id] || 0) + outLm * p.rate;
     }
@@ -327,10 +549,15 @@ function buildDemand(state, month, code) {
     .slice(0, 20)
     .map((c) => {
       const w = c.daysWeight || 0;
+      const pw = c.priorDaysWeight || 0;
+      const avgDays = w ? c.avgDays / w : 0;
+      const priorDays = pw ? c.priorDays / pw : null;
       return {
         company: c.company,
         manager: c.manager,
-        avgDays: w ? c.avgDays / w : 0,
+        avgDays,
+        priorDays,
+        daysDelta: priorDays ? avgDays - priorDays : null,
         avgQty: w ? c.avgQty / w : 0,
         hires: c.hires,
         outLm: c.outLm,
@@ -340,9 +567,14 @@ function buildDemand(state, month, code) {
       };
     });
 
-  const required = item.targetUtil > 0 ? Math.ceil(item.forecastMax / item.targetUtil) : item.forecastMax;
-  const cover = item.totalStock + item.currentOrders;
-  const shortfall = required - cover;
+  const duration = buildDurationSignal({
+    products,
+    productIndex,
+    priorIx,
+    peakIdx,
+    peak,
+    priorMonthId,
+  });
 
   return {
     state,
@@ -350,13 +582,15 @@ function buildDemand(state, month, code) {
     sfFile,
     sfExport: metadata.exportDate || "",
     item,
-    required,
-    cover,
-    shortfall,
+    required: computed.required,
+    cover: computed.cover,
+    shortfall: computed.shortfall,
     peakMonth: peak,
     products,
     months: trajectory,
     companies,
+    duration,
+    family: familyDemand,
     note:
       "Units ≈ forecast LM × this item's Qty per metre. FileMaker Forecast Max is peak in-service (already on hire + net starts), not the sum of monthly OUT.",
   };
@@ -412,8 +646,406 @@ function buildDetails(state, month) {
   };
 }
 
+const STOCKTAKES_FILE = path.join(DATA_DIR, "stocktakes.json");
+const FM_FILE = path.join(DATA_DIR, "fm.json");
+const BRANCH_EXPORT_DIR = "\\\\fs\\apps\\FilemakerCSVExport\\ERP\\BSQ";
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let q = false;
+  const src = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (q) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else q = false;
+      } else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === "," || ch === "\t") {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n") {
+      row.push(cell);
+      if (row.some((c) => String(c).trim())) rows.push(row);
+      row = [];
+      cell = "";
+    } else if (ch !== "\r") cell += ch;
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    if (row.some((c) => String(c).trim())) rows.push(row);
+  }
+  return rows;
+}
+
+function parseDate(v, prefer) {
+  if (v == null || v === "" || v === "?") return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
+  const s = String(v).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (!m) {
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : new Date(t);
+  }
+  let a = Number(m[1]);
+  let b = Number(m[2]);
+  let y = Number(m[3]);
+  if (y < 100) y += 2000;
+  let day;
+  let monthN;
+  if (a > 12) {
+    day = a;
+    monthN = b;
+  } else if (b > 12) {
+    monthN = a;
+    day = b;
+  } else if (prefer === "us") {
+    monthN = a;
+    day = b;
+  } else {
+    day = a;
+    monthN = b;
+  }
+  return new Date(y, monthN - 1, day);
+}
+
+function isoDay(d) {
+  if (!d) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function daysBetween(a, b) {
+  if (!a || !b) return null;
+  return Math.round((b.getTime() - a.getTime()) / 86400000);
+}
+
+function parseBranchStock(raw) {
+  if (!raw) return {};
+  try {
+    const o = typeof raw === "object" ? raw : JSON.parse(String(raw));
+    return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadStocktakeImport() {
+  try {
+    return JSON.parse(fs.readFileSync(STOCKTAKES_FILE, "utf8"));
+  } catch {
+    return { importedAt: "", source: "", rows: [] };
+  }
+}
+
+function saveStocktakeImport(payload) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(STOCKTAKES_FILE, JSON.stringify(payload, null, 2));
+}
+
+function headerKey(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function rowsFromCsv(text) {
+  const grid = parseCsv(text);
+  if (!grid.length) return [];
+  const headers = grid[0].map(headerKey);
+  const idx = {};
+  headers.forEach((h, i) => {
+    if (h && idx[h] == null) idx[h] = i;
+  });
+  const col = (row, names) => {
+    for (const n of names) {
+      const i = idx[headerKey(n)];
+      if (i != null) return row[i];
+    }
+    return "";
+  };
+  const out = [];
+  for (const row of grid.slice(1)) {
+    const code = String(col(row, ["InventoryCode", "ItemCode", "code", "Item", "ITEM CODE"]) || "").trim();
+    if (!code) continue;
+    const last = parseDate(col(row, ["LastStocktake", "cv_LastStocktakeDate", "lastStocktake", "Date", "StocktakeDate"]));
+    const nr = String(col(row, ["StocktakeNotRequired", "notRequired", "NotRequired", "Not Req"]) || "").trim();
+    out.push({
+      code,
+      location: String(col(row, ["BranchCode", "Location", "Branch", "LocationCode", "_LocationID"]) || "").trim(),
+      locationName: String(col(row, ["BranchName", "LocationName"]) || "").trim(),
+      lastStocktake: isoDay(last),
+      notRequired: /^(1|true|yes|y)$/i.test(nr),
+    });
+  }
+  return out;
+}
+
+function loadBranchMap() {
+  try {
+    if (!fs.existsSync(BRANCH_EXPORT_DIR)) return [];
+    const dirs = fs
+      .readdirSync(BRANCH_EXPORT_DIR)
+      .filter((d) => fs.existsSync(path.join(BRANCH_EXPORT_DIR, d, "Branch.csv")))
+      .sort()
+      .reverse();
+    if (!dirs.length) return [];
+    const grid = parseCsv(fs.readFileSync(path.join(BRANCH_EXPORT_DIR, dirs[0], "Branch.csv"), "utf8"));
+    if (grid.length < 2) return [];
+    const headers = grid[0].map(headerKey);
+    const idx = {};
+    headers.forEach((h, i) => {
+      if (h && idx[h] == null) idx[h] = i;
+    });
+    const val = (row, name) => {
+      const i = idx[headerKey(name)];
+      return i == null ? "" : String(row[i] || "").trim();
+    };
+    return grid.slice(1).map((row) => ({
+      id: val(row, "_BranchID"),
+      code: val(row, "BranchCode"),
+      name: val(row, "BranchName"),
+      state: val(row, "A1_State").toUpperCase(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function branchState(loc, name, branches) {
+  const key = String(loc || "").trim().toUpperCase();
+  const nm = String(name || "").trim().toUpperCase();
+  const hit = branches.find(
+    (b) =>
+      (key && (b.code.toUpperCase() === key || b.id === key || b.name.toUpperCase() === key)) ||
+      (nm && b.name.toUpperCase() === nm)
+  );
+  return hit ? hit.state : "";
+}
+
+function loadFmConfig() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(FM_FILE, "utf8"));
+    return {
+      host: String(raw.host || process.env.FM_HOST || "https://fms.bsdomain.local").replace(/\/$/, ""),
+      database: String(raw.database || process.env.FM_DATABASE || "Inventory"),
+      user: String(raw.user || process.env.FM_USER || ""),
+      password: String(raw.password || process.env.FM_PASSWORD || ""),
+      layout: String(raw.layout || process.env.FM_LAYOUT || ""),
+    };
+  } catch {
+    return {
+      host: String(process.env.FM_HOST || "https://fms.bsdomain.local").replace(/\/$/, ""),
+      database: String(process.env.FM_DATABASE || "Inventory"),
+      user: String(process.env.FM_USER || ""),
+      password: String(process.env.FM_PASSWORD || ""),
+      layout: String(process.env.FM_LAYOUT || ""),
+    };
+  }
+}
+
+function httpsJson(url, { method = "GET", headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = require("https").request(
+      url,
+      { method, headers, rejectUnauthorized: false },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          try {
+            resolve({ status: res.statusCode, json: data ? JSON.parse(data) : {} });
+          } catch (e) {
+            reject(new Error(`FileMaker response ${res.statusCode}`));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.setTimeout(30000, () => req.destroy(new Error("FileMaker timeout")));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function fetchFileMakerStocktakes() {
+  const cfg = loadFmConfig();
+  if (!cfg.user || !cfg.password) return null;
+  const auth = Buffer.from(`${cfg.user}:${cfg.password}`).toString("base64");
+  const db = encodeURIComponent(cfg.database);
+  const session = await httpsJson(`${cfg.host}/fmi/data/v1/databases/${db}/sessions`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const token = session.json && session.json.response && session.json.response.token;
+  if (!token) {
+    const msg = (session.json.messages && session.json.messages[0] && session.json.messages[0].message) || "login failed";
+    throw new Error(`FileMaker Data API: ${msg}`);
+  }
+  const hdr = { Authorization: `Bearer ${token}` };
+  try {
+    let layout = cfg.layout;
+    if (!layout) {
+      const layouts = await httpsJson(`${cfg.host}/fmi/data/v1/databases/${db}/layouts`, { headers: hdr });
+      const names = ((layouts.json.response && layouts.json.response.layouts) || [])
+        .flatMap((x) => [x.name, ...((x.folder || x.layouts || []).map((y) => y.name || y))])
+        .filter(Boolean);
+      layout =
+        names.find((n) => /locationitem/i.test(n)) ||
+        names.find((n) => /stock\s*take/i.test(n) && !/pending/i.test(n)) ||
+        names.find((n) => /monthly stock/i.test(n)) ||
+        "";
+    }
+    if (!layout) throw new Error("No LocationItem / Stock Take layout on Inventory Data API");
+    const rows = [];
+    let offset = 1;
+    const limit = 100;
+    for (;;) {
+      const page = await httpsJson(
+        `${cfg.host}/fmi/data/v1/databases/${db}/layouts/${encodeURIComponent(layout)}/records?_limit=${limit}&_offset=${offset}`,
+        { headers: hdr }
+      );
+      const recs = (page.json.response && page.json.response.data) || [];
+      for (const rec of recs) {
+        const f = rec.fieldData || {};
+        const code = String(f.InventoryCode || f.ItemCode || f["LocationItem::InventoryCode"] || "").trim();
+        if (!code) continue;
+        const last = parseDate(
+          f.LastStocktake || f.cv_LastStocktakeDate || f["LocationItem::LastStocktake"] || f.Date,
+          "us"
+        );
+        const nr = f.StocktakeNotRequired || f["LocationItem::StocktakeNotRequired"];
+        rows.push({
+          code,
+          location: String(f.BranchCode || f.Location || f._LocationID || "").trim(),
+          locationName: String(f.BranchName || f.LocationName || "").trim(),
+          lastStocktake: isoDay(last),
+          notRequired: nr === 1 || nr === "1" || nr === true,
+        });
+      }
+      if (recs.length < limit) break;
+      offset += recs.length;
+      if (offset > 20000) break;
+    }
+    return { importedAt: new Date().toISOString(), source: `FileMaker ${cfg.database} / ${layout}`, rows };
+  } finally {
+    await httpsJson(`${cfg.host}/fmi/data/v1/databases/${db}/sessions/${token}`, {
+      method: "DELETE",
+      headers: hdr,
+    }).catch(() => {});
+  }
+}
+
+function buildStocktakes(state, month, staleDays) {
+  const details = buildDetails(state, month);
+  const { items } = loadCalculator(state, month);
+  const byCode = {};
+  for (const it of items) {
+    const code = String(it.InventoryCode || "");
+    if (!code) continue;
+    byCode[code] = parseBranchStock(it[`${state}_BranchStockJSON`]);
+  }
+  const cacheDate = parseDate(details.cacheDate) || parseDate(`${month}-01`);
+  const branches = loadBranchMap();
+  const imported = loadStocktakeImport();
+  const takes = (imported.rows || []).filter((r) => {
+    if (!r.location && !r.locationName) return true;
+    const st = branchState(r.location, r.locationName, branches);
+    return !st || st === state;
+  });
+  const byItem = {};
+  for (const t of takes) {
+    if (!byItem[t.code]) byItem[t.code] = [];
+    byItem[t.code].push(t);
+  }
+  const rows = details.rows.map((r) => {
+    const lines = byItem[r.code] || [];
+    const required = lines.filter((x) => !x.notRequired);
+    const dates = required.map((x) => parseDate(x.lastStocktake)).filter(Boolean);
+    const last = dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
+    const oldest = dates.length ? new Date(Math.min(...dates.map((d) => d.getTime()))) : null;
+    const never = required.filter((x) => !x.lastStocktake).length + (lines.length ? 0 : 0);
+    const daysBefore = daysBetween(last, cacheDate);
+    let status = "no-data";
+    if (!imported.rows.length) status = "no-data";
+    else if (!required.length && lines.some((x) => x.notRequired) && !dates.length) status = "not-required";
+    else if (!last) status = "never";
+    else if (last > cacheDate) status = "after-forecast";
+    else if (daysBefore != null && daysBefore > staleDays) status = "stale";
+    else status = "fresh";
+    const branchStock = byCode[r.code] || {};
+    const branchCount = Object.keys(branchStock).length;
+    return {
+      code: r.code,
+      name: r.name,
+      family: r.family,
+      onHand: r.onHand,
+      inService: r.inService,
+      totalStock: r.totalStock,
+      orderQty: r.orderQty,
+      lastStocktake: isoDay(last),
+      oldestStocktake: isoDay(oldest),
+      daysBeforeForecast: daysBefore,
+      status,
+      branches: required.length || branchCount,
+      neverCounted: lines.length ? required.filter((x) => !x.lastStocktake).length : null,
+      notRequired: lines.filter((x) => x.notRequired).length,
+      locations: required
+        .filter((x) => x.lastStocktake || x.location)
+        .sort((a, b) => String(a.lastStocktake || "").localeCompare(String(b.lastStocktake || "")))
+        .slice(0, 8)
+        .map((x) => ({
+          location: x.location || x.locationName,
+          lastStocktake: x.lastStocktake,
+          notRequired: x.notRequired,
+        })),
+    };
+  });
+  const counted = rows.filter((r) => r.status !== "no-data");
+  const stale = rows.filter((r) => r.status === "stale" || r.status === "never");
+  const families = {};
+  for (const r of rows) {
+    const fam = r.family || "(blank)";
+    if (!families[fam]) families[fam] = { family: fam, n: 0, stale: 0, never: 0, fresh: 0 };
+    families[fam].n += 1;
+    if (r.status === "stale") families[fam].stale += 1;
+    if (r.status === "never") families[fam].never += 1;
+    if (r.status === "fresh") families[fam].fresh += 1;
+  }
+  return {
+    state,
+    month,
+    cacheDate: isoDay(cacheDate),
+    staleDays,
+    source: imported.source || "",
+    importedAt: imported.importedAt || "",
+    hasData: Boolean(imported.rows && imported.rows.length),
+    totals: {
+      items: rows.length,
+      withDate: rows.filter((r) => r.lastStocktake).length,
+      stale: stale.length,
+      never: rows.filter((r) => r.status === "never").length,
+      fresh: rows.filter((r) => r.status === "fresh").length,
+      afterForecast: rows.filter((r) => r.status === "after-forecast").length,
+      notRequired: rows.filter((r) => r.status === "not-required").length,
+      onAskStale: stale.filter((r) => r.orderQty > 0).length,
+      noData: rows.filter((r) => r.status === "no-data").length,
+    },
+    families: Object.values(families).sort((a, b) => b.stale + b.never - (a.stale + a.never) || a.family.localeCompare(b.family)),
+    rows,
+    counted: counted.length,
+  };
+}
+
 const app = express();
-app.use(express.json({ limit: "4mb" }));
+app.use(express.json({ limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
@@ -441,6 +1073,58 @@ app.get("/api/demand", (req, res) => {
     res.json(buildDemand(state, month, code));
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get("/api/stocktakes", (req, res) => {
+  try {
+    const state = String(req.query.state || "QLD").toUpperCase();
+    const month = String(req.query.month || "");
+    const staleDays = Math.max(1, Number(req.query.staleDays || 14) || 14);
+    if (!STATES.includes(state) || !/^\d{4}-\d{2}$/.test(month)) {
+      res.status(400).json({ error: "state and month=YYYY-MM required" });
+      return;
+    }
+    res.json(buildStocktakes(state, month, staleDays));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post("/api/stocktakes/import", (req, res) => {
+  try {
+    const csv = String(req.body.csv || "");
+    const rows = rowsFromCsv(csv);
+    if (!rows.length) {
+      res.status(400).json({ error: "No item rows. Export ItemCode, LastStocktake, Branch/Location, StocktakeNotRequired." });
+      return;
+    }
+    const payload = {
+      importedAt: new Date().toISOString(),
+      source: String(req.body.source || "Stocktake List CSV"),
+      rows,
+    };
+    saveStocktakeImport(payload);
+    res.json({ ok: true, rows: rows.length, importedAt: payload.importedAt });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/stocktakes/refresh", async (req, res) => {
+  try {
+    const pulled = await fetchFileMakerStocktakes();
+    if (!pulled) {
+      res.status(400).json({
+        error:
+          "FileMaker last-stocktake dates are not in the forecast JSON. Add data/fm.json (user, password) or import a Stocktake List CSV.",
+      });
+      return;
+    }
+    saveStocktakeImport(pulled);
+    res.json({ ok: true, rows: pulled.rows.length, source: pulled.source, importedAt: pulled.importedAt });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

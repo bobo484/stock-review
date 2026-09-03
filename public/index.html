@@ -38,6 +38,7 @@
   .chip.on{background:rgba(79,156,249,.18);border-color:var(--accent);color:var(--accent);font-weight:600}
   .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel);max-height:calc(100vh - 340px)}
   table{border-collapse:collapse;width:100%;min-width:1680px}
+  .stocktakes table{min-width:1100px}
   th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
   th{position:sticky;top:0;background:var(--panel2);color:var(--muted);font-size:11px;font-weight:650;text-align:right;z-index:1}
   th.l,td.l{text-align:left}
@@ -61,6 +62,16 @@
   .err{color:var(--red);padding:20px}
   .totals{margin-top:16px;overflow:auto}
   .totals table{min-width:520px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:900px){.split{grid-template-columns:1fr}}
+  .card.warn{border-color:rgba(248,81,73,.45);background:rgba(248,81,73,.08)}
+  .card.good{border-color:rgba(63,185,80,.45);background:rgba(63,185,80,.08)}
+  .card.flat{border-color:rgba(210,153,34,.45);background:rgba(210,153,34,.08)}
+  .chart{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px 8px;margin:12px 0}
+  .chart svg{width:100%;height:240px;display:block}
+  .chart .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;color:var(--muted);font-size:11px}
+  .chart .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .demand-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 </style>
 </head>
 <body>
@@ -81,6 +92,7 @@
   <div class="tabs" id="tabs">
     <button class="on" data-view="details">Details</button>
     <button data-view="demand" id="tabDemand" disabled>Demand</button>
+    <button data-view="stocktakes">Stocktakes</button>
   </div>
   <div class="banner" id="banner">Loading StockCalculator…</div>
   <div id="view-details">
@@ -90,6 +102,7 @@
     <div class="totals" id="totals"></div>
   </div>
   <div id="view-demand" hidden></div>
+  <div id="view-stocktakes" hidden></div>
 </div>
 <script>
 const STATES = ["QLD","NSW","VIC","SA"];
@@ -103,6 +116,11 @@ let q = "";
 let view = "details";
 let selectedCode = "";
 let demand = null;
+let demandScope = "item";
+let stocktakes = null;
+let staleDays = 14;
+let staleOnly = true;
+let stockSort = "stale";
 
 const $ = (id) => document.getElementById(id);
 const aud = (n) => (n||0).toLocaleString("en-AU",{style:"currency",currency:"AUD",maximumFractionDigits:0});
@@ -153,10 +171,152 @@ async function load() {
     data = j;
     family = "ALL";
     $("export").href = `/api/export.xlsx?state=${state}&month=${month}`;
-    draw();
+    if (view === "stocktakes") await loadStocktakes();
+    else draw();
   } catch (e) {
     $("banner").innerHTML = `<span class="err">${e.message}</span>`;
   }
+}
+
+async function loadStocktakes() {
+  $("view-stocktakes").innerHTML = `<div class="banner">Loading stocktake ages for ${esc(state)} ${esc(month)}…</div>`;
+  showView();
+  try {
+    const r = await fetch(`/api/stocktakes?state=${state}&month=${month}&staleDays=${staleDays}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    stocktakes = j;
+    drawStocktakes();
+  } catch (e) {
+    $("view-stocktakes").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function stockStatusLabel(s) {
+  return ({
+    stale: "Stale at forecast",
+    never: "Never counted",
+    fresh: "Counted in window",
+    "after-forecast": "Counted after forecast",
+    "not-required": "Not required",
+    "no-data": "No stocktake date",
+  })[s] || s;
+}
+
+function drawStocktakes() {
+  const d = stocktakes;
+  if (!d) return;
+  const t = d.totals;
+  $("banner").textContent =
+    `${state} ${month} · forecast cache ${d.cacheDate || "—"} · stocktake window ${d.staleDays} days` +
+    (d.source ? ` · ${d.source}${d.importedAt ? " " + new Date(d.importedAt).toLocaleString("en-AU") : ""}` : "");
+  const fams = [{family:"ALL", n:t.items, stale:t.stale, never:t.never}, ...d.families];
+  let rows = d.rows.filter((r) => {
+    if (family !== "ALL" && r.family !== family) return false;
+    if (staleOnly && d.hasData && !(r.status === "stale" || r.status === "never")) return false;
+    if (q && !(`${r.code} ${r.name}`.toLowerCase().includes(q))) return false;
+    return true;
+  });
+  rows = rows.slice().sort((a, b) => {
+    if (stockSort === "item") return a.code.localeCompare(b.code);
+    if (stockSort === "family") return a.family.localeCompare(b.family) || a.code.localeCompare(b.code);
+    if (stockSort === "date") return String(a.lastStocktake || "").localeCompare(String(b.lastStocktake || "")) || a.code.localeCompare(b.code);
+    const rank = { never: 0, stale: 1, "after-forecast": 2, "no-data": 3, "not-required": 4, fresh: 5 };
+    const rd = (rank[a.status] ?? 9) - (rank[b.status] ?? 9);
+    if (rd) return rd;
+    return (b.daysBeforeForecast ?? 9999) - (a.daysBeforeForecast ?? 9999);
+  });
+  const tone = (s) => s === "stale" || s === "never" ? "neg" : s === "fresh" ? "pos" : "";
+  $("view-stocktakes").innerHTML = `
+    <div class="why">
+      <p>Stocktakes should be done <b>just before the forecast</b>. This flags items that, at cache date <b>${esc(d.cacheDate || "—")}</b>, had no count in the last <b>${d.staleDays} days</b>. ${t.onAskStale ? `<span class="neg">${num(t.onAskStale)} of those are on this month’s ask.</span>` : ""}</p>
+      <p class="muted">Dates come from FileMaker LocationItem (LastStocktake). They are not in the StockCalculator JSON. Import a Stocktake List export, or connect Inventory via data/fm.json.</p>
+    </div>
+    <div class="cards">
+      <div class="card warn"><div class="label">Stale / never</div><div class="val neg">${num(t.stale)}</div></div>
+      <div class="card"><div class="label">Never counted</div><div class="val ${t.never?"neg":""}">${num(t.never)}</div></div>
+      <div class="card"><div class="label">On the ask + stale</div><div class="val ${t.onAskStale?"neg":""}">${num(t.onAskStale)}</div></div>
+      <div class="card good"><div class="label">Counted in window</div><div class="val pos">${num(t.fresh)}</div></div>
+      <div class="card"><div class="label">All items</div><div class="val">${num(t.items)}</div></div>
+      <div class="card"><div class="label">With a date</div><div class="val">${num(t.withDate)}</div></div>
+    </div>
+    <div class="row" style="margin:8px 0 12px">
+      <label class="muted">Flag if older than</label>
+      <select id="staleDays">${[7,14,30,60].map(n => `<option value="${n}" ${n===staleDays?"selected":""}>${n} days</option>`).join("")}</select>
+      <select id="stockSort">
+        <option value="stale" ${stockSort==="stale"?"selected":""}>Sort: worst first</option>
+        <option value="item" ${stockSort==="item"?"selected":""}>Sort: item</option>
+        <option value="family" ${stockSort==="family"?"selected":""}>Sort: family</option>
+        <option value="date" ${stockSort==="date"?"selected":""}>Sort: last stocktake</option>
+      </select>
+      <button class="btn ${staleOnly?"primary":""}" id="staleOnly">${staleOnly?"Stale / never only":"All items"}</button>
+      <label class="btn">${d.hasData ? "Replace CSV" : "Import Stocktake List CSV"}<input id="stockCsv" type="file" accept=".csv,.txt,text/csv" hidden /></label>
+      <button class="btn" id="fmRefresh">Pull from FileMaker</button>
+    </div>
+    <div class="chips" id="stockFams">${fams.map(f =>
+      `<button class="chip ${f.family===family?"on":""}" data-f="${esc(f.family)}">${f.family==="ALL"?"All families":esc(f.family)} · ${num(f.n)}${f.stale||f.never?` · <span class="neg">${num((f.stale||0)+(f.never||0))} stale</span>`:""}</button>`
+    ).join("")}</div>
+    <div class="table-wrap stocktakes" style="max-height:calc(100vh - 380px)">
+      <table>
+        <thead><tr>
+          <th class="l">Item</th><th class="l">Family</th>
+          <th>Last stocktake</th><th>Oldest branch</th>
+          <th>Days before forecast</th><th class="l">Status</th>
+          <th>On ask</th><th>Total stock</th><th>On hand</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="clickable ${r.status==="stale"||r.status==="never"?"order":""}" data-code="${esc(r.code)}">
+            <td class="l"><b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name,15))}</div></td>
+            <td class="l">${esc(r.family)}</td>
+            <td>${r.lastStocktake || "—"}</td>
+            <td>${r.oldestStocktake || "—"}</td>
+            <td class="${tone(r.status)}">${r.daysBeforeForecast==null?"—":num(r.daysBeforeForecast)}</td>
+            <td class="l ${tone(r.status)}">${esc(stockStatusLabel(r.status))}</td>
+            <td>${r.orderQty?num(r.orderQty):""}</td>
+            <td><b>${num(r.totalStock)}</b></td>
+            <td>${num(r.onHand)}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+  $("staleDays").onchange = () => { staleDays = Number($("staleDays").value); loadStocktakes(); };
+  $("stockSort").onchange = () => { stockSort = $("stockSort").value; drawStocktakes(); };
+  $("staleOnly").onclick = () => { staleOnly = !staleOnly; drawStocktakes(); };
+  $("stockFams").onclick = (e) => {
+    const f = e.target.closest("[data-f]");
+    if (!f) return;
+    family = f.dataset.f;
+    drawStocktakes();
+  };
+  $("stockCsv").onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const csv = await file.text();
+    const r = await fetch("/api/stocktakes/import", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ csv, source: file.name })
+    });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || r.statusText); return; }
+    loadStocktakes();
+  };
+  $("fmRefresh").onclick = async () => {
+    $("fmRefresh").disabled = true;
+    $("fmRefresh").textContent = "Pulling…";
+    try {
+      const r = await fetch("/api/stocktakes/refresh", { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      await loadStocktakes();
+    } catch (err) {
+      alert(err.message);
+      $("fmRefresh").disabled = false;
+      $("fmRefresh").textContent = "Pull from FileMaker";
+    }
+  };
+  $("view-stocktakes").querySelectorAll("tr[data-code]").forEach((tr) => {
+    tr.addEventListener("click", () => openDemand(tr.dataset.code));
+  });
 }
 
 function visibleRows() {
@@ -269,11 +429,14 @@ $("tabs").onclick = (e) => {
   if (v === "demand" && !selectedCode) return;
   view = v;
   showView();
+  if (v === "stocktakes") loadStocktakes();
 };
 
 function showView() {
   $("view-details").hidden = view !== "details";
   $("view-demand").hidden = view !== "demand";
+  $("view-stocktakes").hidden = view !== "stocktakes";
+  $("onlyOrders").hidden = view === "stocktakes";
   $("tabs").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
 }
 
@@ -289,77 +452,290 @@ async function openDemand(code) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
     demand = j;
+    demandScope = "item";
     drawDemand();
   } catch (e) {
     $("view-demand").innerHTML = `<div class="err">${esc(e.message)}</div>`;
   }
 }
 
+function daysf(n) {
+  return n == null || !Number.isFinite(Number(n)) ? "—" : Number(n).toFixed(1);
+}
+function signed(n, digits) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  return (v > 0 ? "+" : "") + v.toFixed(digits);
+}
+
+function durationBlock(d) {
+  const dur = d.duration || {};
+  const peak = d.peakMonth || {};
+  const priorLabel = dur.priorMonth || "last forecast";
+  const dir = dur.direction || "stable";
+  const tone = dir === "longer" ? "warn" : dir === "shorter" ? "good" : "flat";
+  const dirWord = dir === "longer" ? "increased" : dir === "shorter" ? "decreased" : "held steady";
+  const extra = Math.round(dur.extraUnits || 0);
+  const extraAbs = Math.abs(extra);
+  let impact = `No prior Sales Forecast (${priorLabel}) to compare hire duration.`;
+  if (dur.prior != null && dur.delta != null) {
+    const held = dir === "longer"
+      ? `About ${num(extraAbs)} extra units of this item stay on hire instead of coming back for the next install — same starts, more fleet, higher ask.`
+      : dir === "shorter"
+        ? `About ${num(extraAbs)} units come back sooner and can be used again — that eases the ask.`
+        : `Duration has not moved enough to change the ask on its own.`;
+    impact = `Hire duration has <b>${dirWord}</b> versus ${esc(priorLabel)}. Weighted days are ${daysf(dur.compared != null ? dur.compared : dur.current)} now vs ${daysf(dur.prior)} last forecast (${signed(dur.delta, 1)} days${dur.deltaPct != null ? ", " + signed(dur.deltaPct, 1) + "%" : ""}). ${held}`;
+  }
+  const moverRows = (rows) => rows && rows.length
+    ? rows.map((m) => `<tr>
+        <td class="l">${esc(m.company)}</td>
+        <td class="l muted">${esc(m.product)}</td>
+        <td>${daysf(m.priorDays)}</td>
+        <td>${daysf(m.days)}</td>
+        <td class="${m.delta>0?"neg":"pos"}">${signed(m.delta, 0)}</td>
+        <td>${num(Math.round(m.units))}</td>
+        <td class="${m.extraUnits>0?"neg":"pos"}">${signed(m.extraUnits, 0)}</td>
+      </tr>`).join("")
+    : `<tr><td class="l muted" colspan="7">None over 1 day</td></tr>`;
+  const moverHead = `<thead><tr>
+    <th class="l">Customer</th><th class="l">Product</th><th>Was</th><th>Now</th>
+    <th>Δ days</th><th>Peak units</th><th>Extra held</th>
+  </tr></thead>`;
+  return `
+    <h2>Hire duration — stock staying out</h2>
+    <p class="muted">Weighted by each customer’s peak-month units of this item (LM × qty/m), so large clients move the signal. Compared on the same customer × product set as ${esc(priorLabel)}. Extra held = this month’s starts × change in days ÷ working days (${dur.workingDays || "—"}) — stock that does not come back to install again.</p>
+    <div class="cards">
+      <div class="card ${tone}"><div class="label">Weighted days now</div><div class="val">${daysf(dur.compared != null ? dur.compared : dur.current)}</div></div>
+      <div class="card"><div class="label">${esc(priorLabel)} weighted</div><div class="val">${daysf(dur.prior)}</div></div>
+      <div class="card ${tone}"><div class="label">Change</div><div class="val ${dur.delta>0?"neg":dur.delta<0?"pos":""}">${signed(dur.delta, 1)}d</div></div>
+      <div class="card ${tone}"><div class="label">${dir === "shorter" ? "Units released" : "Extra units held"}</div><div class="val ${extra>0?"neg":extra<0?"pos":""}">${extra ? signed(extra, 0) : "—"}</div></div>
+    </div>
+    <div class="why ${tone === "warn" ? "card warn" : tone === "good" ? "card good" : ""}">
+      <p>${impact}</p>
+    </div>
+    <div class="split">
+      <div>
+        <h2>Lengthening — increases the ask</h2>
+        <div class="table-wrap" style="max-height:none">
+          <table>${moverHead}<tbody>${moverRows(dur.longer)}</tbody></table>
+        </div>
+      </div>
+      <div>
+        <h2>Shortening — eases the ask</h2>
+        <div class="table-wrap" style="max-height:none">
+          <table>${moverHead}<tbody>${moverRows(dur.shorter)}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
+function demandChart(months, refs) {
+  const W = 760, H = 240;
+  const pad = { l: 56, r: 14, t: 18, b: 34 };
+  const innerW = W - pad.l - pad.r;
+  const innerH = H - pad.t - pad.b;
+  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0]);
+  if (refs) {
+    if (refs.required) vals.push(refs.required);
+    if (refs.forecastMax) vals.push(refs.forecastMax);
+    if (refs.cover) vals.push(refs.cover);
+  }
+  const max = Math.max(1, ...vals);
+  const y = (v) => pad.t + innerH - (Math.max(0, v) / max) * innerH;
+  const n = Math.max(1, (months || []).length);
+  const gw = innerW / n;
+  const barW = Math.max(8, gw / 6);
+  const ticks = 4;
+  let grid = "";
+  for (let i = 0; i <= ticks; i++) {
+    const v = max * (i / ticks);
+    const yy = y(v);
+    grid += `<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" stroke="#2d3845"/>`;
+    grid += `<text x="${pad.l-6}" y="${yy+3}" text-anchor="end" fill="#8b98a5" font-size="10">${num(Math.round(v))}</text>`;
+  }
+  let bars = "";
+  let linePts = [];
+  (months || []).forEach((m, i) => {
+    const cx = pad.l + i * gw + gw / 2;
+    const peak = refs && refs.peakIndex === m.index;
+    if (peak) bars += `<rect x="${cx-gw/2+4}" y="${pad.t}" width="${gw-8}" height="${innerH}" fill="rgba(79,156,249,.08)"/>`;
+    const out = m.outUnits || 0;
+    const inn = m.inUnits || 0;
+    const net = m.netUnits || 0;
+    bars += `<rect x="${cx-barW*1.6}" y="${y(out)}" width="${barW}" height="${Math.max(0, y(0)-y(out))}" fill="#4f9cf9" rx="2"/>`;
+    bars += `<rect x="${cx-barW*0.5}" y="${y(inn)}" width="${barW}" height="${Math.max(0, y(0)-y(inn))}" fill="#3fb950" rx="2"/>`;
+    const netFill = net >= 0 ? "#f85149" : "#a371f7";
+    bars += `<rect x="${cx+barW*0.6}" y="${y(Math.abs(net))}" width="${barW}" height="${Math.max(0, y(0)-y(Math.abs(net)))}" fill="${netFill}" rx="2"/>`;
+    if (net < 0 && Math.abs(net) > 0) {
+      bars += `<text x="${cx+barW*1.1}" y="${y(Math.abs(net))-4}" text-anchor="middle" fill="#a371f7" font-size="9">${signed(net, 0)}</text>`;
+    }
+    const label = (m.date || "").slice(0, 7) || ("M" + m.index);
+    bars += `<text x="${cx}" y="${H-12}" text-anchor="middle" fill="${peak?"#4f9cf9":"#8b98a5"}" font-size="11">${esc(label)}${peak?" · peak":""}</text>`;
+    linePts.push(`${cx},${y(m.projectedInService || 0)}`);
+  });
+  let refsSvg = "";
+  const dash = (value, color) => {
+    if (!value) return "";
+    const yy = y(value);
+    return `<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" stroke="${color}" stroke-dasharray="5 4" stroke-width="1.2"/>`;
+  };
+  if (refs) {
+    refsSvg += dash(refs.required, "#f85149");
+    refsSvg += dash(refs.cover, "#8b98a5");
+  }
+  const dots = (months || []).map((m, i) => {
+    const cx = pad.l + i * gw + gw / 2;
+    return `<circle cx="${cx}" cy="${y(m.projectedInService || 0)}" r="3.5" fill="#d29922"/>`;
+  }).join("");
+  return `<div class="chart">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}${refsSvg}
+      <polyline fill="none" stroke="#d29922" stroke-width="2" points="${linePts.join(" ")}"/>${dots}
+    </svg>
+    <div class="legend">
+      <span><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
+      <span><i class="sw" style="background:#3fb950"></i>IN returning</span>
+      <span><i class="sw" style="background:#f85149"></i>NET extra held</span>
+      <span><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
+      <span><i class="sw" style="background:#d29922"></i>Projected in service</span>
+      <span><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
+      <span><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
+    </div>
+  </div>`;
+}
+
 function drawDemand() {
   const d = demand;
   const it = d.item;
-  const peak = d.peakMonth || {};
+  const fam = d.family || {};
+  const familyMode = demandScope === "family" && fam.name;
+  const peak = (familyMode ? fam.peakMonth : d.peakMonth) || {};
+  const months = familyMode ? (fam.months || []) : d.months;
   const peakLabel = peak.date ? peak.date.slice(0, 7) : `Month ${peak.index}`;
-  const why = it.orderQty > 0
-    ? `${it.code} is on the ask because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so the calculator proposes buying ${num(it.orderQty)}.`
-    : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
+  const why = familyMode
+    ? `${esc(fam.name)} is ${num(fam.itemCount)} items. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. Proposed buy across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} order lines).`
+    : (it.orderQty > 0
+      ? `${it.code} is on the ask because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so the calculator proposes buying ${num(it.orderQty)}.`
+      : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`);
   const peakWhy = peak.outUnits
-    ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits))} returning, net ${num(Math.round(peak.netUnits))}.`
+    ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}.`
     : "";
+  const dur = d.duration || {};
+  const durWhy = !familyMode && dur.delta != null && Math.abs(dur.delta) >= 0.5
+    ? ` Hire duration has ${dur.direction === "longer" ? "increased" : "decreased"} ${signed(dur.delta, 1)} days versus ${esc(dur.priorMonth || "last forecast")} (weighted by customer size). ${dur.direction === "longer" ? "Stock is staying out longer, so less comes back to install again." : "Jobs are turning faster, so more stock comes back."}`
+    : "";
+  const kpis = familyMode
+    ? [
+        ["Forecast max IS", num(fam.forecastMax)],
+        ["Required at target", num(fam.required)],
+        ["Total + on order", num(fam.cover)],
+        ["Shortfall", num(fam.shortfall), cls(-fam.shortfall)],
+        ["Proposed buy", fam.orderQty ? num(fam.orderQty) : "—"],
+        ["Now in service", num(fam.inService)],
+      ]
+    : [
+        ["Forecast max IS", num(it.forecastMax)],
+        ["Required at target", num(d.required)],
+        ["Total + on order", num(d.cover)],
+        ["Shortfall", num(d.shortfall), cls(-d.shortfall)],
+        ["Proposed buy", it.orderQty ? num(it.orderQty) : "—"],
+        ["Now in service", num(it.inService)],
+      ];
+  const refs = {
+    required: familyMode ? fam.required : d.required,
+    forecastMax: familyMode ? fam.forecastMax : it.forecastMax,
+    cover: familyMode ? fam.cover : d.cover,
+    peakIndex: peak.index,
+  };
 
   $("view-demand").innerHTML = `
+    <div class="demand-head">
+      <div class="seg" id="demandScope">
+        <button data-scope="item" class="${familyMode?"":"on"}">${esc(it.code)}</button>
+        <button data-scope="family" class="${familyMode?"on":""}">${esc(it.family || "Family")}${fam.itemCount ? " · " + fam.itemCount : ""}</button>
+      </div>
+    </div>
     <div class="why">
-      <p><b>${esc(it.code)}</b> · ${esc(it.name)} · ${esc(it.family)}</p>
-      <p>${why}${peakWhy}</p>
-      <p class="muted">${esc(d.note)} Source ${esc(d.sfFile)}${d.sfExport ? " · " + esc(d.sfExport) : ""}.</p>
+      <p><b>${familyMode ? esc(fam.name) : esc(it.code)}</b> · ${familyMode ? num(fam.itemCount) + " items" : esc(it.name) + " · " + esc(it.family)}</p>
+      <p>${why}${peakWhy}${durWhy}</p>
+      <p class="muted">${familyMode ? "Family totals sum each item’s units (LM × that item’s qty/m). Hires are not summed — the same job uses many items." : esc(d.note)} Source ${esc(d.sfFile)}${d.sfExport ? " · " + esc(d.sfExport) : ""}.</p>
     </div>
     <div class="cards">
-      <div class="card"><div class="label">Forecast max IS</div><div class="val">${num(it.forecastMax)}</div></div>
-      <div class="card"><div class="label">Required at target</div><div class="val">${num(d.required)}</div></div>
-      <div class="card"><div class="label">Total + on order</div><div class="val">${num(d.cover)}</div></div>
-      <div class="card"><div class="label">Shortfall</div><div class="val ${cls(-d.shortfall)}">${num(d.shortfall)}</div></div>
-      <div class="card"><div class="label">Proposed buy</div><div class="val">${it.orderQty ? num(it.orderQty) : "—"}</div></div>
-      <div class="card"><div class="label">Now in service</div><div class="val">${num(it.inService)}</div></div>
+      ${kpis.map(([label, val, klass]) => `<div class="card"><div class="label">${label}</div><div class="val ${klass||""}">${val}</div></div>`).join("")}
     </div>
+    <h2>Demand over the forecast period</h2>
+    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.</p>
+    ${demandChart(months, refs)}
+    ${familyMode ? "" : durationBlock(d)}
     <h2>Monthly starts vs returning</h2>
     <p class="muted">OUT = forecasted site starts (LM × qty/m). IN = returning contracts. NET = extra stock the fleet must hold that month.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Month</th><th>Working days</th><th>Hires</th>
+          <th class="l">Month</th><th>Working days</th>
+          ${familyMode ? "" : "<th>Hires</th>"}
           <th>OUT units</th><th>IN units</th><th>NET units</th>
-          <th>Projected IS</th><th>OUT LM</th><th>NET LM</th>
+          <th>Projected IS</th>
+          ${familyMode ? "" : "<th>OUT LM</th><th>NET LM</th>"}
         </tr></thead>
-        <tbody>${d.months.map(m => `
+        <tbody>${months.map(m => `
           <tr class="${m.index===peak.index?"order":""}">
             <td class="l">${esc((m.date||"").slice(0,7) || ("M"+m.index))}${m.index===peak.index?" · peak starts":""}</td>
             <td>${m.workingDays||"—"}</td>
-            <td>${num(m.hires)}</td>
+            ${familyMode ? "" : `<td>${num(m.hires)}</td>`}
             <td>${num(Math.round(m.outUnits))}</td>
             <td>${num(Math.round(m.inUnits))}</td>
             <td class="${cls(m.netUnits)}">${num(Math.round(m.netUnits))}</td>
             <td>${num(Math.round(m.projectedInService))}</td>
-            <td>${num(Math.round(m.outLm))}</td>
-            <td class="${cls(m.netLm)}">${num(Math.round(m.netLm))}</td>
+            ${familyMode ? "" : `<td>${num(Math.round(m.outLm))}</td><td class="${cls(m.netLm)}">${num(Math.round(m.netLm))}</td>`}
           </tr>`).join("")}</tbody>
       </table>
     </div>
+    ${familyMode ? `
+    <h2>Items in ${esc(fam.name)}</h2>
+    <p class="muted">Click an item to open its own demand. Sorted by proposed buy, then peak starts.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          <th class="l">Item</th><th>Forecast max</th><th>Required</th><th>Cover</th>
+          <th>Shortfall</th><th>Proposed buy</th><th>Buy $</th>
+          <th>Peak OUT</th><th>Now IS</th><th>Total stock</th>
+        </tr></thead>
+        <tbody>${(fam.members||[]).map(m => `
+          <tr class="clickable ${m.code===it.code?"order":""}" data-code="${esc(m.code)}">
+            <td class="l"><b>${esc(m.code)}</b><div class="muted">${esc(clip(m.name,15))}</div></td>
+            <td>${num(m.forecastMax)}</td>
+            <td>${num(m.required)}</td>
+            <td>${num(m.cover)}</td>
+            <td class="${cls(-m.shortfall)}">${num(m.shortfall)}</td>
+            <td>${m.orderQty?num(m.orderQty):""}</td>
+            <td>${m.orderCost?aud(m.orderCost):""}</td>
+            <td>${num(Math.round(m.peakOut))}</td>
+            <td>${num(m.inService)}</td>
+            <td><b>${num(m.totalStock)}</b></td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>` : `
     <h2>Where this item is used (qty per metre)</h2>
-    <p class="muted">Frequency of use on each hire product. Rate change vs last month’s calculator if available.</p>
+    <p class="muted">Frequency of use on each hire product. Rate change vs last month’s calculator if available. Days are customer-weighted on this product.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
           <th class="l">Product</th><th>Qty / m</th><th>Prior month</th><th>Change</th>
+          <th>Days now</th><th>Days was</th><th>Δ days</th>
           <th>Peak OUT units</th><th>Peak hires</th>
         </tr></thead>
         <tbody>${d.products.map(p => {
           const pm = p.months[peak.index-1] || p.months[0] || {};
           const ch = p.rateDelta == null ? "—" : ((p.rateDelta>0?"+":"")+p.rateDelta.toFixed(4));
+          const pd = (dur.byProduct || []).find(x => x.code === p.code) || {};
           return `<tr>
             <td class="l"><b>${esc(p.code)}</b><div class="muted">${esc(p.name)}</div></td>
             <td>${p.rate.toFixed(4)}</td>
             <td>${p.priorRate==null?"—":p.priorRate.toFixed(4)}</td>
             <td class="${p.rateDelta>0?"neg":p.rateDelta<0?"pos":""}">${ch}</td>
+            <td>${daysf(pd.days)}</td>
+            <td>${daysf(pd.priorDays)}</td>
+            <td class="${pd.delta>0?"neg":pd.delta<0?"pos":""}">${signed(pd.delta, 1)}</td>
             <td>${num(Math.round(pm.outUnits||0))}</td>
             <td>${num(pm.hires||0)}</td>
           </tr>`;
@@ -367,18 +743,22 @@ function drawDemand() {
       </table>
     </div>
     <h2>Customers driving ${esc(peakLabel)} starts</h2>
-    <p class="muted">Hire duration is average days on that customer × product. Units = their forecast LM × this item’s qty/m.</p>
+    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m — larger clients weigh more in the duration signal above.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Company</th><th class="l">AM</th><th>Avg days</th><th>Avg LM/hire</th>
+          <th class="l">Company</th><th class="l">AM</th>
+          <th>Days now</th><th>Days was</th><th>Δ days</th>
+          <th>Avg LM/hire</th>
           <th>Hires</th><th>OUT LM</th><th>NET LM</th><th>This item units</th>
         </tr></thead>
         <tbody>${d.companies.map(c => `
           <tr>
             <td class="l">${esc(c.company)}</td>
             <td class="l muted">${esc(c.manager)}</td>
-            <td>${c.avgDays?num(c.avgDays):"—"}</td>
+            <td>${c.avgDays?daysf(c.avgDays):"—"}</td>
+            <td>${daysf(c.priorDays)}</td>
+            <td class="${c.daysDelta>0?"neg":c.daysDelta<0?"pos":""}">${signed(c.daysDelta, 1)}</td>
             <td>${c.avgQty?c.avgQty.toFixed(1):"—"}</td>
             <td>${num(c.hires)}</td>
             <td>${num(Math.round(c.outLm))}</td>
@@ -386,7 +766,16 @@ function drawDemand() {
             <td><b>${num(Math.round(c.units))}</b></td>
           </tr>`).join("")}</tbody>
       </table>
-    </div>`;
+    </div>`}`;
+  $("demandScope").onclick = (e) => {
+    const s = e.target.dataset.scope;
+    if (!s || s === demandScope) return;
+    demandScope = s;
+    drawDemand();
+  };
+  $("view-demand").querySelectorAll("tr[data-code]").forEach((tr) => {
+    tr.addEventListener("click", () => openDemand(tr.dataset.code));
+  });
 }
 
 boot().catch(e => { $("banner").innerHTML = `<span class="err">${e.message}</span>`; });
