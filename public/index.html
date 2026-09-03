@@ -743,19 +743,28 @@ function drawDemand() {
       </table>
     </div>
     <h2>Customers driving ${esc(peakLabel)} starts</h2>
-    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m — larger clients weigh more in the duration signal above.</p>
+    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m. ${esc(d.poSource || "Customer POs from live ERP.")} Waiting = PO raised, not yet on hire.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
           <th class="l">Company</th><th class="l">AM</th>
+          <th class="l">Latest PO</th><th>POs</th><th>Contracts</th><th>Waiting</th>
+          <th>Avg days to on hire</th>
           <th>Days now</th><th>Days was</th><th>Δ days</th>
           <th>Avg LM/hire</th>
           <th>Hires</th><th>OUT LM</th><th>NET LM</th><th>This item units</th>
         </tr></thead>
-        <tbody>${d.companies.map(c => `
-          <tr>
+        <tbody>${d.companies.map(c => {
+          const po = c.po || {};
+          const poTitle = (po.poNumbers || []).join(", ");
+          return `<tr>
             <td class="l">${esc(c.company)}</td>
             <td class="l muted">${esc(c.manager)}</td>
+            <td class="l" title="${esc(poTitle)}">${esc(po.latestPo || "—")}${po.latestRaised ? `<div class="muted">${esc(po.latestRaised)}</div>` : ""}</td>
+            <td>${po.withPo != null ? num(po.withPo) : "—"}</td>
+            <td>${po.contracts != null ? num(po.contracts) : "—"}</td>
+            <td class="${po.waiting>0?"neg":""}">${po.waiting ? num(po.waiting) : "—"}</td>
+            <td>${po.avgDays==null?"—":daysf(po.avgDays)}</td>
             <td>${c.avgDays?daysf(c.avgDays):"—"}</td>
             <td>${daysf(c.priorDays)}</td>
             <td class="${c.daysDelta>0?"neg":c.daysDelta<0?"pos":""}">${signed(c.daysDelta, 1)}</td>
@@ -764,7 +773,8 @@ function drawDemand() {
             <td>${num(Math.round(c.outLm))}</td>
             <td class="${cls(c.netLm)}">${num(Math.round(c.netLm))}</td>
             <td><b>${num(Math.round(c.units))}</b></td>
-          </tr>`).join("")}</tbody>
+          </tr>`;
+        }).join("")}</tbody>
       </table>
     </div>`}`;
   $("demandScope").onclick = (e) => {

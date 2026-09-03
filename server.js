@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const ExcelJS = require("exceljs");
+const { loadCompanyPos, attachPos } = require("./erp-pos");
 
 const PORT = Number(process.env.PORT || 5174);
 const STOCK_DIR =
@@ -456,7 +457,7 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
   };
 }
 
-function buildDemand(state, month, code) {
+async function buildDemand(state, month, code) {
   const { items } = loadCalculator(state, month);
   const rawItem = items.find((it) => String(it.InventoryCode) === code);
   if (!rawItem) {
@@ -576,6 +577,17 @@ function buildDemand(state, month, code) {
     priorMonthId,
   });
 
+  let companiesOut = companies;
+  let poSource = "";
+  try {
+    const productCodes = products.map((p) => p.code).filter(Boolean);
+    const posMap = await loadCompanyPos(state, productCodes);
+    companiesOut = attachPos(companies, posMap);
+    poSource = "Live ERP contracts (last 12 months). Days = Date raised → on hire.";
+  } catch (err) {
+    poSource = `Customer POs unavailable: ${err.message}`;
+  }
+
   return {
     state,
     month,
@@ -588,9 +600,10 @@ function buildDemand(state, month, code) {
     peakMonth: peak,
     products,
     months: trajectory,
-    companies,
+    companies: companiesOut,
     duration,
     family: familyDemand,
+    poSource,
     note:
       "Units ≈ forecast LM × this item's Qty per metre. FileMaker Forecast Max is peak in-service (already on hire + net starts), not the sum of monthly OUT.",
   };
@@ -1061,7 +1074,7 @@ app.get("/api/files", (_req, res) => {
   res.json({ files: listFiles() });
 });
 
-app.get("/api/demand", (req, res) => {
+app.get("/api/demand", async (req, res) => {
   try {
     const state = String(req.query.state || "QLD").toUpperCase();
     const month = String(req.query.month || "");
@@ -1070,7 +1083,7 @@ app.get("/api/demand", (req, res) => {
       res.status(400).json({ error: "state, month, code required" });
       return;
     }
-    res.json(buildDemand(state, month, code));
+    res.json(await buildDemand(state, month, code));
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
