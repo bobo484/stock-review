@@ -457,6 +457,66 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
   };
 }
 
+function buildConversion(companies, months, peak) {
+  const byMonth = (months || []).map((m) => ({
+    index: m.index,
+    date: m.date,
+    key: String(m.date || "").slice(0, 7),
+    forecastOut: m.outUnits || 0,
+    poUnits: 0,
+  }));
+  const monthIx = {};
+  byMonth.forEach((m, i) => {
+    if (m.key) monthIx[m.key] = i;
+  });
+  let waiting = 0;
+  let firmUnits = 0;
+  let dayS = 0;
+  let dayW = 0;
+  const withFirm = (companies || []).map((c) => {
+    const po = c.po || {};
+    const rate = c.outLm > 0 ? c.units / c.outLm : 0;
+    const unitPerHire = (c.avgQty || 0) * rate;
+    const fu = (po.waiting || 0) * unitPerHire;
+    waiting += po.waiting || 0;
+    firmUnits += fu;
+    if (po.avgDays != null && fu > 0) {
+      dayS += po.avgDays * fu;
+      dayW += fu;
+    }
+    const lag = po.avgDays != null ? po.avgDays : 70;
+    for (const iso of po.waitingRaised || []) {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) continue;
+      d.setDate(d.getDate() + Math.round(lag));
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      if (monthIx[key] != null) byMonth[monthIx[key]].poUnits += unitPerHire;
+    }
+    return { ...c, firmUnits: fu };
+  });
+  const peakOut = peak && peak.outUnits ? peak.outUnits : 0;
+  const peakKey = peak && peak.date ? String(peak.date).slice(0, 7) : "";
+  const peakPoUnits = (byMonth.find((m) => m.key === peakKey) || {}).poUnits || 0;
+  const firmPct = peakOut > 0 ? peakPoUnits / peakOut : null;
+  let confidence = "no-data";
+  if (firmPct != null) {
+    if (firmPct >= 0.7) confidence = "firm";
+    else if (firmPct >= 0.4) confidence = "mixed";
+    else confidence = "soft";
+  }
+  return {
+    waiting,
+    firmUnits,
+    peakPoUnits,
+    peakOut,
+    firmPct,
+    avgDays: dayW ? dayS / dayW : null,
+    confidence,
+    months: byMonth,
+    companies: withFirm,
+  };
+}
+
 async function buildDemand(state, month, code) {
   const { items } = loadCalculator(state, month);
   const rawItem = items.find((it) => String(it.InventoryCode) === code);
@@ -579,11 +639,14 @@ async function buildDemand(state, month, code) {
 
   let companiesOut = companies;
   let poSource = "";
+  let conversion = null;
   try {
     const productCodes = products.map((p) => p.code).filter(Boolean);
     const posMap = await loadCompanyPos(state, productCodes);
     companiesOut = attachPos(companies, posMap);
-    poSource = "Live ERP contracts (last 12 months). Days = Date raised → on hire.";
+    conversion = buildConversion(companiesOut, trajectory, peak);
+    companiesOut = conversion.companies;
+    poSource = "Live ERP contracts (last 12 months). Days = Date raised → on hire. Firm units = waiting POs × avg LM/hire × qty/m.";
   } catch (err) {
     poSource = `Customer POs unavailable: ${err.message}`;
   }
@@ -604,6 +667,7 @@ async function buildDemand(state, month, code) {
     duration,
     family: familyDemand,
     poSource,
+    conversion,
     note:
       "Units ≈ forecast LM × this item's Qty per metre. FileMaker Forecast Max is peak in-service (already on hire + net starts), not the sum of monthly OUT.",
   };

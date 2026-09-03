@@ -10,6 +10,7 @@
     --text:#e6edf3; --muted:#8b98a5; --accent:#4f9cf9;
     --green:#3fb950; --greenbg:rgba(63,185,80,.12);
     --red:#f85149; --redbg:rgba(248,81,73,.12); --amber:#d29922; --amberbg:rgba(210,153,34,.12);
+    --cyan:#39d0d8;
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:13px}
@@ -529,12 +530,50 @@ function durationBlock(d) {
     </div>`;
 }
 
+function mergePoMonths(months, conversion) {
+  if (!conversion || !conversion.months) return months || [];
+  const map = {};
+  for (const m of conversion.months) {
+    const key = m.key || String(m.date || "").slice(0, 7);
+    if (key) map[key] = m.poUnits || 0;
+  }
+  return (months || []).map((m) => ({
+    ...m,
+    poUnits: map[String(m.date || "").slice(0, 7)] || 0,
+  }));
+}
+
+function firmBlock(d) {
+  const c = d.conversion;
+  if (!c) return "";
+  const tone = c.confidence || "no-data";
+  const cover = c.firmPct == null ? "—" : Math.round(c.firmPct * 100) + "%";
+  const cardTone = tone === "firm" ? "good" : tone === "mixed" ? "flat" : tone === "soft" ? "warn" : "";
+  const sentences = {
+    firm: `Waiting POs timed to the peak month already cover <b>${cover}</b> of those starts (${num(Math.round(c.peakPoUnits || 0))} of ${num(Math.round(c.peakOut))} units). The wider pipeline is ${num(Math.round(c.firmUnits))} units still waiting to go on hire. Treat the calculator ask as firm unless stock + on order already covers it.`,
+    mixed: `Waiting POs timed to the peak month cover <b>${cover}</b> of those starts (${num(Math.round(c.peakPoUnits || 0))} of ${num(Math.round(c.peakOut))}). Another ${num(Math.round(c.firmUnits))} units sit in the pipeline. Use conversion days (${daysf(c.avgDays)}) to judge timing.`,
+    soft: `Waiting POs timed to the peak month cover only <b>${cover}</b> of those starts. Most of the FileMaker ask is still forecast, not yet on a customer PO — go easier on Decision unless duration or cover is already tight. Pipeline waiting: ${num(Math.round(c.firmUnits))} units.`,
+    "no-data": "No waiting customer POs matched for this item yet.",
+  };
+  return `
+    <h2>Firm demand vs forecast</h2>
+    <p class="muted">Customer POs already raised and not yet on hire, converted to this item’s units (waiting × avg LM/hire × qty/m). Expected hire month = date raised + that builder’s average days to on hire. This does not change the FileMaker formula — it tells you how much of the peak is already contracted.</p>
+    <div class="cards">
+      <div class="card ${cardTone}"><div class="label">PO cover of peak</div><div class="val">${cover}</div></div>
+      <div class="card"><div class="label">Firm units waiting</div><div class="val">${num(Math.round(c.firmUnits))}</div></div>
+      <div class="card"><div class="label">Peak forecast OUT</div><div class="val">${num(Math.round(c.peakOut))}</div></div>
+      <div class="card"><div class="label">Conversion days</div><div class="val">${c.avgDays == null ? "—" : daysf(c.avgDays)}</div></div>
+    </div>
+    <div class="why ${cardTone ? "card " + cardTone : ""}"><p>${sentences[tone] || sentences["no-data"]}</p></div>
+  `;
+}
+
 function demandChart(months, refs) {
   const W = 760, H = 240;
   const pad = { l: 56, r: 14, t: 18, b: 34 };
   const innerW = W - pad.l - pad.r;
   const innerH = H - pad.t - pad.b;
-  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0]);
+  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0, m.poUnits || 0]);
   if (refs) {
     if (refs.required) vals.push(refs.required);
     if (refs.forecastMax) vals.push(refs.forecastMax);
@@ -555,6 +594,7 @@ function demandChart(months, refs) {
   }
   let bars = "";
   let linePts = [];
+  let poPts = [];
   (months || []).forEach((m, i) => {
     const cx = pad.l + i * gw + gw / 2;
     const peak = refs && refs.peakIndex === m.index;
@@ -572,6 +612,7 @@ function demandChart(months, refs) {
     const label = (m.date || "").slice(0, 7) || ("M" + m.index);
     bars += `<text x="${cx}" y="${H-12}" text-anchor="middle" fill="${peak?"#4f9cf9":"#8b98a5"}" font-size="11">${esc(label)}${peak?" · peak":""}</text>`;
     linePts.push(`${cx},${y(m.projectedInService || 0)}`);
+    if (m.poUnits) poPts.push(`${cx},${y(m.poUnits)}`);
   });
   let refsSvg = "";
   const dash = (value, color) => {
@@ -587,9 +628,18 @@ function demandChart(months, refs) {
     const cx = pad.l + i * gw + gw / 2;
     return `<circle cx="${cx}" cy="${y(m.projectedInService || 0)}" r="3.5" fill="#d29922"/>`;
   }).join("");
+  const poDots = (months || []).map((m, i) => {
+    if (!m.poUnits) return "";
+    const cx = pad.l + i * gw + gw / 2;
+    return `<circle cx="${cx}" cy="${y(m.poUnits)}" r="4" fill="#39d0d8"/>`;
+  }).join("");
+  const poLine = poPts.length
+    ? `<polyline fill="none" stroke="#39d0d8" stroke-width="2" stroke-dasharray="4 3" points="${poPts.join(" ")}"/>`
+    : "";
   return `<div class="chart">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}${refsSvg}
       <polyline fill="none" stroke="#d29922" stroke-width="2" points="${linePts.join(" ")}"/>${dots}
+      ${poLine}${poDots}
     </svg>
     <div class="legend">
       <span><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
@@ -597,6 +647,7 @@ function demandChart(months, refs) {
       <span><i class="sw" style="background:#f85149"></i>NET extra held</span>
       <span><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
       <span><i class="sw" style="background:#d29922"></i>Projected in service</span>
+      <span><i class="sw" style="background:#39d0d8"></i>PO-backed starts</span>
       <span><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
       <span><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
     </div>
@@ -609,7 +660,7 @@ function drawDemand() {
   const fam = d.family || {};
   const familyMode = demandScope === "family" && fam.name;
   const peak = (familyMode ? fam.peakMonth : d.peakMonth) || {};
-  const months = familyMode ? (fam.months || []) : d.months;
+  const months = mergePoMonths(familyMode ? (fam.months || []) : d.months, familyMode ? null : d.conversion);
   const peakLabel = peak.date ? peak.date.slice(0, 7) : `Month ${peak.index}`;
   const why = familyMode
     ? `${esc(fam.name)} is ${num(fam.itemCount)} items. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. Proposed buy across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} order lines).`
@@ -662,8 +713,9 @@ function drawDemand() {
     <div class="cards">
       ${kpis.map(([label, val, klass]) => `<div class="card"><div class="label">${label}</div><div class="val ${klass||""}">${val}</div></div>`).join("")}
     </div>
+    ${familyMode ? "" : firmBlock(d)}
     <h2>Demand over the forecast period</h2>
-    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.</p>
+    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan line is waiting customer POs timed to expected hire month."}</p>
     ${demandChart(months, refs)}
     ${familyMode ? "" : durationBlock(d)}
     <h2>Monthly starts vs returning</h2>
@@ -673,7 +725,7 @@ function drawDemand() {
         <thead><tr>
           <th class="l">Month</th><th>Working days</th>
           ${familyMode ? "" : "<th>Hires</th>"}
-          <th>OUT units</th><th>IN units</th><th>NET units</th>
+          <th>OUT units</th>${familyMode ? "" : "<th>PO-backed</th>"}<th>IN units</th><th>NET units</th>
           <th>Projected IS</th>
           ${familyMode ? "" : "<th>OUT LM</th><th>NET LM</th>"}
         </tr></thead>
@@ -683,6 +735,7 @@ function drawDemand() {
             <td>${m.workingDays||"—"}</td>
             ${familyMode ? "" : `<td>${num(m.hires)}</td>`}
             <td>${num(Math.round(m.outUnits))}</td>
+            ${familyMode ? "" : `<td>${m.poUnits ? num(Math.round(m.poUnits)) : "—"}</td>`}
             <td>${num(Math.round(m.inUnits))}</td>
             <td class="${cls(m.netUnits)}">${num(Math.round(m.netUnits))}</td>
             <td>${num(Math.round(m.projectedInService))}</td>
@@ -743,12 +796,12 @@ function drawDemand() {
       </table>
     </div>
     <h2>Customers driving ${esc(peakLabel)} starts</h2>
-    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m. ${esc(d.poSource || "Customer POs from live ERP.")} Waiting = PO raised, not yet on hire.</p>
+    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m. Firm units = waiting POs × avg LM/hire × qty/m. ${esc(d.poSource || "Customer POs from live ERP.")} Waiting = PO raised, not yet on hire.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
           <th class="l">Company</th><th class="l">AM</th>
-          <th class="l">Latest PO</th><th>POs</th><th>Contracts</th><th>Waiting</th>
+          <th class="l">Latest PO</th><th>POs</th><th>Contracts</th>          <th>Waiting</th><th>Firm units</th>
           <th>Avg days to on hire</th>
           <th>Days now</th><th>Days was</th><th>Δ days</th>
           <th>Avg LM/hire</th>
@@ -764,6 +817,7 @@ function drawDemand() {
             <td>${po.withPo != null ? num(po.withPo) : "—"}</td>
             <td>${po.contracts != null ? num(po.contracts) : "—"}</td>
             <td class="${po.waiting>0?"neg":""}">${po.waiting ? num(po.waiting) : "—"}</td>
+            <td>${c.firmUnits ? num(Math.round(c.firmUnits)) : "—"}</td>
             <td>${po.avgDays==null?"—":daysf(po.avgDays)}</td>
             <td>${c.avgDays?daysf(c.avgDays):"—"}</td>
             <td>${daysf(c.priorDays)}</td>

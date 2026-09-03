@@ -55,6 +55,7 @@ function emptyPos() {
     latestPo: "",
     latestRaised: null,
     poNumbers: [],
+    waitingRaised: [],
   };
 }
 
@@ -108,6 +109,7 @@ async function loadCompanyPos(state, productCodes) {
         daySum: 0,
         dayN: 0,
         pos: [],
+        waitingRaised: [],
       };
     }
     const rec = map[k];
@@ -122,7 +124,10 @@ async function loadCompanyPos(state, productCodes) {
     if (po) {
       rec.withPo += 1;
       rec.pos.push({ po, raised });
-      if (!onHire) rec.waiting += 1;
+      if (!onHire) {
+        rec.waiting += 1;
+        if (raised && !Number.isNaN(raised.getTime())) rec.waitingRaised.push(raised.toISOString());
+      }
     }
     if (raised && onHire && !Number.isNaN(raised.getTime()) && !Number.isNaN(onHire.getTime())) {
       rec.daySum += Math.round((onHire.getTime() - raised.getTime()) / 86400000);
@@ -148,6 +153,7 @@ async function loadCompanyPos(state, productCodes) {
       latestPo: uniq[0] || "",
       latestRaised: rec.pos[0] && rec.pos[0].raised ? isoDay(rec.pos[0].raised) : null,
       poNumbers: uniq,
+      waitingRaised: rec.waitingRaised.slice(0, 400),
     };
     out[k] = payload;
     out[normName(rec.company)] = payload;
