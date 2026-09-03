@@ -1,0 +1,4 @@
+node_modules/
+data/decisions.json
+*.log
+.DS_Store

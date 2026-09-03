@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Review</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a2129; --panel2:#222b35; --border:#2d3845;
+    --text:#e6edf3; --muted:#8b98a5; --accent:#4f9cf9;
+    --green:#3fb950; --greenbg:rgba(63,185,80,.12);
+    --red:#f85149; --redbg:rgba(248,81,73,.12); --amber:#d29922; --amberbg:rgba(210,153,34,.12);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:13px}
+  header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px}
+  header h1{margin:0;font-size:18px;font-weight:650}
+  header .sub{color:var(--muted);font-size:12px;margin-top:3px}
+  .wrap{padding:14px 24px 48px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg button,.btn,select,input[type=search]{
+    font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 12px
+  }
+  .seg button{border:0;border-radius:0;cursor:pointer}
+  .seg button.on{background:var(--accent);color:#08111f;font-weight:650}
+  .btn{cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent);color:#08111f;border-color:var(--accent);font-weight:650}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:12px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:10px 12px}
+  .card .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+  .card .val{font-size:20px;font-weight:650;margin-top:4px;font-variant-numeric:tabular-nums}
+  .val.green{color:var(--green)} .val.red{color:var(--red)}
+  .banner{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:10px 12px;color:var(--muted);font-size:12px;margin-bottom:12px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px}
+  .chip{padding:5px 11px;border-radius:999px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);cursor:pointer;font:inherit}
+  .chip.on{background:rgba(79,156,249,.18);border-color:var(--accent);color:var(--accent);font-weight:600}
+  .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel);max-height:calc(100vh - 340px)}
+  table{border-collapse:collapse;width:100%;min-width:1680px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+  th{position:sticky;top:0;background:var(--panel2);color:var(--muted);font-size:11px;font-weight:650;text-align:right;z-index:1}
+  th.l,td.l{text-align:left}
+  tbody tr:hover{background:rgba(79,156,249,.06)}
+  tbody tr.order{background:rgba(79,156,249,.04)}
+  tbody tr.clickable{cursor:pointer}
+  .tabs{display:flex;gap:6px;margin:0 0 12px}
+  .tabs button{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);cursor:pointer;font:inherit}
+  .tabs button.on{background:var(--accent);color:#08111f;font-weight:650}
+  .tabs button:disabled{opacity:.4;cursor:not-allowed}
+  .why{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+  .why p{margin:0 0 8px;line-height:1.45}
+  .why p:last-child{margin-bottom:0}
+  h2{font-size:14px;font-weight:650;margin:18px 0 8px}
+  .neg{color:var(--red)} .pos{color:var(--green)}
+  td input.dec{
+    width:78px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);
+    background:#0f1419;color:var(--text);text-align:right;font:inherit
+  }
+  .muted{color:var(--muted)}
+  .err{color:var(--red);padding:20px}
+  .totals{margin-top:16px;overflow:auto}
+  .totals table{min-width:520px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Stock Review</h1>
+    <div class="sub">Forecast Orders Details — stock, utilisation, surplus, proposed buy. Decision is for GMs to type.</div>
+  </div>
+  <div class="row">
+    <div class="seg" id="states"></div>
+    <select id="month"></select>
+    <button class="btn" id="onlyOrders">Order lines only</button>
+    <input type="search" id="q" placeholder="Search code or name" />
+    <a class="btn primary" id="export" href="#">Export Excel</a>
+  </div>
+</header>
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <button class="on" data-view="details">Details</button>
+    <button data-view="demand" id="tabDemand" disabled>Demand</button>
+  </div>
+  <div class="banner" id="banner">Loading StockCalculator…</div>
+  <div id="view-details">
+    <div class="cards" id="kpis"></div>
+    <div class="chips" id="families"></div>
+    <div class="table-wrap" id="grid"></div>
+    <div class="totals" id="totals"></div>
+  </div>
+  <div id="view-demand" hidden></div>
+</div>
+<script>
+const STATES = ["QLD","NSW","VIC","SA"];
+let files = [];
+let state = "QLD";
+let month = "2026-09";
+let data = null;
+let family = "ALL";
+let onlyOrders = true;
+let q = "";
+let view = "details";
+let selectedCode = "";
+let demand = null;
+
+const $ = (id) => document.getElementById(id);
+const aud = (n) => (n||0).toLocaleString("en-AU",{style:"currency",currency:"AUD",maximumFractionDigits:0});
+const num = (n) => (n||0).toLocaleString("en-AU");
+const pct = (n) => n ? (n*100).toFixed(0)+"%" : "—";
+const cls = (n) => n < 0 ? "neg" : n > 0 ? "pos" : "";
+
+async function boot() {
+  const r = await fetch("/api/files");
+  const j = await r.json();
+  files = j.files || [];
+  const qld = files.filter(f => f.state === "QLD");
+  if (qld.length) month = qld[0].month;
+  else if (files[0]) { state = files[0].state; month = files[0].month; }
+  renderControls();
+  await load();
+}
+
+function renderControls() {
+  $("states").innerHTML = STATES.map(s =>
+    `<button data-s="${s}" class="${s===state?"on":""}">${s}</button>`
+  ).join("");
+  $("states").onclick = (e) => {
+    const s = e.target.dataset.s;
+    if (!s) return;
+    state = s;
+    const avail = files.filter(f => f.state === s);
+    if (avail.length && !avail.some(f => f.month === month)) month = avail[0].month;
+    renderControls();
+    load();
+  };
+  const months = [...new Set(files.filter(f => f.state === state).map(f => f.month))];
+  $("month").innerHTML = months.map(m => `<option ${m===month?"selected":""}>${m}</option>`).join("");
+  $("month").onchange = () => { month = $("month").value; load(); };
+  $("onlyOrders").className = "btn" + (onlyOrders ? " primary" : "");
+  $("onlyOrders").onclick = () => { onlyOrders = !onlyOrders; $("onlyOrders").className = "btn" + (onlyOrders ? " primary" : ""); draw(); };
+  $("q").oninput = () => { q = $("q").value.trim().toLowerCase(); draw(); };
+  $("export").href = `/api/export.xlsx?state=${state}&month=${month}`;
+}
+
+async function load() {
+  $("banner").textContent = `Loading ${state} ${month}…`;
+  $("grid").innerHTML = "";
+  try {
+    const r = await fetch(`/api/details?state=${state}&month=${month}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    data = j;
+    family = "ALL";
+    $("export").href = `/api/export.xlsx?state=${state}&month=${month}`;
+    draw();
+  } catch (e) {
+    $("banner").innerHTML = `<span class="err">${e.message}</span>`;
+  }
+}
+
+function visibleRows() {
+  if (!data) return [];
+  return data.rows.filter(r => {
+    if (onlyOrders && !(r.orderQty > 0)) return false;
+    if (family !== "ALL" && r.family !== family) return false;
+    if (q && !(`${r.code} ${r.name}`.toLowerCase().includes(q))) return false;
+    return true;
+  });
+}
+
+function draw() {
+  if (!data) return;
+  const t = data.totals;
+  const locked = data.orderSubmitted ? `Forecast Orders locked: ${data.orderSubmitted}` : "Forecast Orders not locked";
+  $("banner").textContent =
+    `${data.file} · cache ${data.cacheDate || "—"} · submitted ${data.forecastSubmitted || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}`;
+  $("kpis").innerHTML = `
+    <div class="card"><div class="label">Original ask</div><div class="val">${aud(t.orderCost)}</div></div>
+    <div class="card"><div class="label">Order lines</div><div class="val">${num(t.orderLines)}</div></div>
+    <div class="card"><div class="label">Order qty</div><div class="val">${num(t.orderQty)}</div></div>
+    <div class="card"><div class="label">Shortfall SKUs</div><div class="val red">${num(t.shortfallLines)}</div></div>
+    <div class="card"><div class="label">System requested</div><div class="val">${aud(t.sysCost)}</div></div>
+    <div class="card"><div class="label">Decision so far</div><div class="val">${aud(t.decisionCost)}</div></div>`;
+  const fams = [{family:"ALL", orderLines:t.orderLines, orderCost:t.orderCost}, ...data.families.filter(f => f.orderLines)];
+  $("families").innerHTML = fams.map(f =>
+    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}">${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.orderCost)}</button>`
+  ).join("");
+  $("families").onclick = (e) => {
+    const f = e.target.dataset.f;
+    if (!f) return;
+    family = f;
+    draw();
+  };
+  const others = STATES.filter(s => s !== state);
+  const rows = visibleRows();
+  $("grid").innerHTML = `<table>
+    <thead><tr>
+      <th class="l">Item</th><th class="l">Family</th><th>Landed</th>
+      <th>On Hand</th><th>In Service</th><th>Total Stock</th>
+      <th>Util</th><th>Target</th><th>Current Orders</th>
+      <th>Surplus</th><th>Order Qty</th>
+      <th>${others[0]} sug.</th><th>${others[1]} sug.</th><th>${others[2]} sug.</th>
+      <th>Decision</th><th>Decision $</th>
+      <th>System qty</th><th>System $</th>
+      <th>Prop. surplus</th><th>Prop. util</th><th>Order $</th>
+    </tr></thead>
+    <tbody>${rows.map(r => `
+      <tr class="clickable ${r.orderQty>0?"order":""}" data-code="${esc(r.code)}">
+        <td class="l"><b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div></td>
+        <td class="l">${esc(r.family)}</td>
+        <td>${aud(r.landed)}</td>
+        <td>${num(r.onHand)}</td>
+        <td>${num(r.inService)}</td>
+        <td><b>${num(r.totalStock)}</b></td>
+        <td>${pct(r.util)}</td>
+        <td>${pct(r.targetUtil)}</td>
+        <td>${num(r.currentOrders)}</td>
+        <td class="${cls(r.surplus)}">${num(r.surplus)}</td>
+        <td>${r.orderQty?num(r.orderQty):""}</td>
+        <td>${r.suggested[others[0]]?num(r.suggested[others[0]]):""}</td>
+        <td>${r.suggested[others[1]]?num(r.suggested[others[1]]):""}</td>
+        <td>${r.suggested[others[2]]?num(r.suggested[others[2]]):""}</td>
+        <td><input class="dec" data-code="${esc(r.code)}" value="${r.decision==null?"":r.decision}" /></td>
+        <td>${r.decision==null?"":aud(r.decisionCost)}</td>
+        <td>${num(r.sysQty)}</td>
+        <td>${aud(r.sysCost)}</td>
+        <td class="${cls(r.proposedSurplus)}">${num(r.proposedSurplus)}</td>
+        <td>${pct(r.proposedUtil)}</td>
+        <td>${r.orderQty?aud(r.orderCost):""}</td>
+      </tr>`).join("")}</tbody>
+  </table>`;
+  $("grid").querySelectorAll("input.dec").forEach(inp => {
+    inp.addEventListener("click", (e) => e.stopPropagation());
+    inp.addEventListener("change", () => saveDecision(inp.dataset.code, inp.value));
+  });
+  $("grid").querySelectorAll("tr[data-code]").forEach(tr => {
+    tr.addEventListener("click", () => openDemand(tr.dataset.code));
+  });
+  $("totals").innerHTML = `<table>
+    <thead><tr><th class="l">Family</th><th>Order lines</th><th>Original ask</th><th>System requested</th><th>Decision</th></tr></thead>
+    <tbody>${data.families.filter(f => f.orderLines || f.decisionCost).map(f => `
+      <tr><td class="l">${esc(f.family)}</td><td>${num(f.orderLines)}</td><td>${aud(f.orderCost)}</td><td>${aud(f.sysCost)}</td><td>${aud(f.decisionCost)}</td></tr>
+    `).join("")}
+    <tr><td class="l"><b>Grand total</b></td><td><b>${num(t.orderLines)}</b></td><td><b>${aud(t.orderCost)}</b></td><td><b>${aud(t.sysCost)}</b></td><td><b>${aud(t.decisionCost)}</b></td></tr>
+    </tbody></table>`;
+}
+
+function esc(s) {
+  return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function clip(s, n) {
+  const t = String(s || "");
+  return t.length > n ? t.slice(0, n) + "…" : t;
+}
+
+async function saveDecision(code, value) {
+  await fetch("/api/decisions", {
+    method: "PUT",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ state, month, code, decision: value })
+  });
+  await load();
+}
+
+$("tabs").onclick = (e) => {
+  const v = e.target.dataset.view;
+  if (!v) return;
+  if (v === "demand" && !selectedCode) return;
+  view = v;
+  showView();
+};
+
+function showView() {
+  $("view-details").hidden = view !== "details";
+  $("view-demand").hidden = view !== "demand";
+  $("tabs").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
+}
+
+async function openDemand(code) {
+  selectedCode = code;
+  $("tabDemand").disabled = false;
+  $("tabDemand").textContent = `Demand · ${code}`;
+  view = "demand";
+  $("view-demand").innerHTML = `<div class="banner">Loading demand for ${esc(code)}…</div>`;
+  showView();
+  try {
+    const r = await fetch(`/api/demand?state=${state}&month=${month}&code=${encodeURIComponent(code)}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    demand = j;
+    drawDemand();
+  } catch (e) {
+    $("view-demand").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function drawDemand() {
+  const d = demand;
+  const it = d.item;
+  const peak = d.peakMonth || {};
+  const peakLabel = peak.date ? peak.date.slice(0, 7) : `Month ${peak.index}`;
+  const why = it.orderQty > 0
+    ? `${it.code} is on the ask because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so the calculator proposes buying ${num(it.orderQty)}.`
+    : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
+  const peakWhy = peak.outUnits
+    ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits))} returning, net ${num(Math.round(peak.netUnits))}.`
+    : "";
+
+  $("view-demand").innerHTML = `
+    <div class="why">
+      <p><b>${esc(it.code)}</b> · ${esc(it.name)} · ${esc(it.family)}</p>
+      <p>${why}${peakWhy}</p>
+      <p class="muted">${esc(d.note)} Source ${esc(d.sfFile)}${d.sfExport ? " · " + esc(d.sfExport) : ""}.</p>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="label">Forecast max IS</div><div class="val">${num(it.forecastMax)}</div></div>
+      <div class="card"><div class="label">Required at target</div><div class="val">${num(d.required)}</div></div>
+      <div class="card"><div class="label">Total + on order</div><div class="val">${num(d.cover)}</div></div>
+      <div class="card"><div class="label">Shortfall</div><div class="val ${cls(-d.shortfall)}">${num(d.shortfall)}</div></div>
+      <div class="card"><div class="label">Proposed buy</div><div class="val">${it.orderQty ? num(it.orderQty) : "—"}</div></div>
+      <div class="card"><div class="label">Now in service</div><div class="val">${num(it.inService)}</div></div>
+    </div>
+    <h2>Monthly starts vs returning</h2>
+    <p class="muted">OUT = forecasted site starts (LM × qty/m). IN = returning contracts. NET = extra stock the fleet must hold that month.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          <th class="l">Month</th><th>Working days</th><th>Hires</th>
+          <th>OUT units</th><th>IN units</th><th>NET units</th>
+          <th>Projected IS</th><th>OUT LM</th><th>NET LM</th>
+        </tr></thead>
+        <tbody>${d.months.map(m => `
+          <tr class="${m.index===peak.index?"order":""}">
+            <td class="l">${esc((m.date||"").slice(0,7) || ("M"+m.index))}${m.index===peak.index?" · peak starts":""}</td>
+            <td>${m.workingDays||"—"}</td>
+            <td>${num(m.hires)}</td>
+            <td>${num(Math.round(m.outUnits))}</td>
+            <td>${num(Math.round(m.inUnits))}</td>
+            <td class="${cls(m.netUnits)}">${num(Math.round(m.netUnits))}</td>
+            <td>${num(Math.round(m.projectedInService))}</td>
+            <td>${num(Math.round(m.outLm))}</td>
+            <td class="${cls(m.netLm)}">${num(Math.round(m.netLm))}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>
+    <h2>Where this item is used (qty per metre)</h2>
+    <p class="muted">Frequency of use on each hire product. Rate change vs last month’s calculator if available.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          <th class="l">Product</th><th>Qty / m</th><th>Prior month</th><th>Change</th>
+          <th>Peak OUT units</th><th>Peak hires</th>
+        </tr></thead>
+        <tbody>${d.products.map(p => {
+          const pm = p.months[peak.index-1] || p.months[0] || {};
+          const ch = p.rateDelta == null ? "—" : ((p.rateDelta>0?"+":"")+p.rateDelta.toFixed(4));
+          return `<tr>
+            <td class="l"><b>${esc(p.code)}</b><div class="muted">${esc(p.name)}</div></td>
+            <td>${p.rate.toFixed(4)}</td>
+            <td>${p.priorRate==null?"—":p.priorRate.toFixed(4)}</td>
+            <td class="${p.rateDelta>0?"neg":p.rateDelta<0?"pos":""}">${ch}</td>
+            <td>${num(Math.round(pm.outUnits||0))}</td>
+            <td>${num(pm.hires||0)}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>
+    <h2>Customers driving ${esc(peakLabel)} starts</h2>
+    <p class="muted">Hire duration is average days on that customer × product. Units = their forecast LM × this item’s qty/m.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          <th class="l">Company</th><th class="l">AM</th><th>Avg days</th><th>Avg LM/hire</th>
+          <th>Hires</th><th>OUT LM</th><th>NET LM</th><th>This item units</th>
+        </tr></thead>
+        <tbody>${d.companies.map(c => `
+          <tr>
+            <td class="l">${esc(c.company)}</td>
+            <td class="l muted">${esc(c.manager)}</td>
+            <td>${c.avgDays?num(c.avgDays):"—"}</td>
+            <td>${c.avgQty?c.avgQty.toFixed(1):"—"}</td>
+            <td>${num(c.hires)}</td>
+            <td>${num(Math.round(c.outLm))}</td>
+            <td class="${cls(c.netLm)}">${num(Math.round(c.netLm))}</td>
+            <td><b>${num(Math.round(c.units))}</b></td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+boot().catch(e => { $("banner").innerHTML = `<span class="err">${e.message}</span>`; });
+</script>
+</body>
+</html>
