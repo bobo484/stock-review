@@ -525,9 +525,50 @@ function loadCalculatorNearest(state, month) {
   return null;
 }
 
-function buildNationalFamilyTimeline(familyName, month) {
+function familyStockKpis(items, state, familyName, calcFile) {
+  const familyItems = (items || []).filter((it) => String(it.Family || "") === familyName && String(it.InventoryCode || ""));
+  let forecastMax = 0;
+  let required = 0;
+  let cover = 0;
+  let inService = 0;
+  let totalStock = 0;
+  let currentOrders = 0;
+  let orderQty = 0;
+  let orderCost = 0;
+  let orderLines = 0;
+  for (const it of familyItems) {
+    const r = mapRow(it, state);
+    const req = r.targetUtil > 0 ? Math.ceil(r.forecastMax / r.targetUtil) : r.forecastMax;
+    forecastMax += r.forecastMax;
+    required += req;
+    cover += r.totalStock + r.currentOrders;
+    inService += r.inService;
+    totalStock += r.totalStock;
+    currentOrders += r.currentOrders;
+    orderQty += r.orderQty;
+    orderCost += r.orderCost;
+    if (r.orderQty > 0) orderLines += 1;
+  }
+  return {
+    state,
+    calcFile: calcFile || "",
+    itemCount: familyItems.length,
+    forecastMax,
+    required,
+    cover,
+    shortfall: required - cover,
+    inService,
+    totalStock,
+    currentOrders,
+    orderQty,
+    orderCost,
+    orderLines,
+  };
+}
+
+function buildNationalFamilyView(familyName, month) {
   const combined = [];
-  const statesUsed = [];
+  const byState = [];
   for (const st of STATES) {
     let sf;
     try {
@@ -542,9 +583,57 @@ function buildNationalFamilyTimeline(familyName, month) {
     if (!familyItems.length) continue;
     const rows = buildFamilyTimeline(familyItems, st, sf.records, monthMeta, productIndex);
     addTimelineRows(combined, rows);
-    statesUsed.push(st);
+    const kpis = familyStockKpis(calc.items, st, familyName, calc.file);
+    const peak = rows.filter((r) => r.role === "forecast").reduce((a, b) => ((b.forecastOut || 0) > (a.forecastOut || 0) ? b : a), { forecastOut: 0, key: "" });
+    byState.push({
+      ...kpis,
+      sfFile: sf.file,
+      peakKey: peak.key,
+      peakForecastOut: peak.forecastOut || 0,
+    });
   }
-  return { timeline: combined, statesUsed };
+  const totals = byState.reduce(
+    (s, r) => {
+      s.itemCount += r.itemCount;
+      s.forecastMax += r.forecastMax;
+      s.required += r.required;
+      s.cover += r.cover;
+      s.shortfall += r.shortfall;
+      s.inService += r.inService;
+      s.totalStock += r.totalStock;
+      s.currentOrders += r.currentOrders;
+      s.orderQty += r.orderQty;
+      s.orderCost += r.orderCost;
+      s.orderLines += r.orderLines;
+      return s;
+    },
+    {
+      itemCount: 0,
+      forecastMax: 0,
+      required: 0,
+      cover: 0,
+      shortfall: 0,
+      inService: 0,
+      totalStock: 0,
+      currentOrders: 0,
+      orderQty: 0,
+      orderCost: 0,
+      orderLines: 0,
+      peakForecastOut: 0,
+    }
+  );
+  const natPeak = combined
+    .filter((r) => r.role === "forecast")
+    .reduce((a, b) => ((b.forecastOut || 0) > (a.forecastOut || 0) ? b : a), { forecastOut: 0, key: "" });
+  totals.peakForecastOut = natPeak.forecastOut || 0;
+  totals.peakKey = natPeak.key || "";
+  return {
+    name: familyName,
+    timeline: combined,
+    statesUsed: byState.map((s) => s.state),
+    byState,
+    totals,
+  };
 }
 
 function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, monthCache, records) {
@@ -716,14 +805,12 @@ async function buildDemand(state, month, code) {
   const trajectory = computed.months;
   const peak = computed.peakMonth;
   const familyDemand = buildFamilyDemand(items, state, item.family, monthMeta, productIndex, monthCache, records);
+  familyDemand.timelineStates = [state];
+  let national = { name: item.family, timeline: [], statesUsed: [], byState: [], totals: {} };
   try {
-    const national = buildNationalFamilyTimeline(item.family, month);
-    if (national.timeline.length) {
-      familyDemand.timeline = national.timeline;
-      familyDemand.timelineStates = national.statesUsed;
-    }
+    national = buildNationalFamilyView(item.family, month);
   } catch {
-    familyDemand.timelineStates = [state];
+    national = { name: item.family, timeline: familyDemand.timeline || [], statesUsed: [state], byState: [], totals: {} };
   }
 
   const peakIdx = peak.index || 1;
@@ -835,6 +922,7 @@ async function buildDemand(state, month, code) {
     companies: companiesOut,
     duration,
     family: familyDemand,
+    national,
     poSource,
     conversion,
     note:

@@ -802,6 +802,39 @@ function familyTimelineChart(rows) {
   </div>`;
 }
 
+function nationalStateTable(nat) {
+  const rows = nat.byState || [];
+  if (!rows.length) return "";
+  return `
+    <h2>By state — submitted Sales Forecast</h2>
+    <p class="muted">Each state’s submitted SF for this family. Stock required uses that state’s latest StockCalculator (Forecast Orders file may be a month behind).</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          ${thTip("State", "State Sales Forecast included in the national total.", true)}
+          ${thTip("SF file", "Sales Forecast file used for submitted LM.")}
+          ${thTip("Calc file", "Latest StockCalculator used for qty/m and stock required.")}
+          ${thTip("Items", "Family SKUs in that calculator.")}
+          ${thTip("Peak SF units", "Highest forward-month submitted SF units in this family.")}
+          ${thTip("Required", TIPS.required)}
+          ${thTip("Cover", TIPS.cover)}
+          ${thTip("Shortfall", TIPS.shortfall)}
+        </tr></thead>
+        <tbody>${rows.map((r) => `
+          <tr>
+            ${tdTip(esc(r.state), "State included in the national view.", "", true)}
+            ${tdTip(esc(r.sfFile || "—"), "Sales Forecast file.")}
+            ${tdTip(esc(r.calcFile || "—"), "StockCalculator used for qty/m.")}
+            ${tdTip(num(r.itemCount), "Family SKUs.")}
+            ${tdTip(num(Math.round(r.peakForecastOut || 0)), TIPS.timelineForecast)}
+            ${tdTip(num(r.required), TIPS.required)}
+            ${tdTip(num(r.cover), TIPS.cover)}
+            ${tdTip(num(r.shortfall), TIPS.shortfall, cls(-r.shortfall))}
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
 function familyTimelineBlock(fam) {
   const rows = fam.timeline || [];
   if (!rows.length) return "";
@@ -930,23 +963,41 @@ function drawDemand() {
   const d = demand;
   const it = d.item;
   const fam = d.family || {};
+  const nat = d.national || {};
   const familyMode = demandScope === "family" && fam.name;
+  const nationalMode = demandScope === "national";
+  const natTot = nat.totals || {};
+  const natPeakRow = (nat.timeline || [])
+    .filter((r) => r.role === "forecast")
+    .reduce((a, b) => ((b.forecastOut || 0) > (a.forecastOut || 0) ? b : a), { forecastOut: 0, key: "" });
+  const natPeakUnits = natPeakRow.forecastOut || natTot.peakForecastOut || 0;
   const peak = (familyMode ? fam.peakMonth : d.peakMonth) || {};
   const months = mergePoMonths(familyMode ? (fam.months || []) : d.months, familyMode ? null : d.conversion);
   const peakLabel = peak.date ? peak.date.slice(0, 7) : `Month ${peak.index}`;
-  const why = familyMode
-    ? `${esc(fam.name)} is ${num(fam.itemCount)} items. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. Proposed buy across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} order lines).`
-    : (it.orderQty > 0
+  const why = nationalMode
+    ? `${esc(nat.name || fam.name || "Family")} national view uses submitted Sales Forecast from ${(nat.statesUsed || []).join(", ") || "no states yet"} — not Forecast Orders. Peak submitted starts are ${num(Math.round(natPeakUnits))} family units${natPeakRow.key ? " in " + esc(natPeakRow.key) : ""}. System required from each state’s latest calculator is ${num(natTot.required || 0)}; stock + on order cover ${num(natTot.cover || 0)}, shortfall ${num(natTot.shortfall || 0)}.`
+    : familyMode
+    ? `${esc(fam.name)} is ${num(fam.itemCount)} items in ${esc(state)}. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. Proposed buy across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} order lines).`
+    : (it.orderQty > 0)
       ? `${it.code} is on the ask because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so the calculator proposes buying ${num(it.orderQty)}.`
-      : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`);
-  const peakWhy = peak.outUnits
+      : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
+  const peakWhy = !nationalMode && peak.outUnits
     ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}.`
     : "";
   const dur = d.duration || {};
-  const durWhy = !familyMode && dur.delta != null && Math.abs(dur.delta) >= 0.5
+  const durWhy = !familyMode && !nationalMode && dur.delta != null && Math.abs(dur.delta) >= 0.5
     ? ` Hire duration has ${dur.direction === "longer" ? "increased" : "decreased"} ${signed(dur.delta, 1)} days versus ${esc(dur.priorMonth || "last forecast")} (weighted by customer size). ${dur.direction === "longer" ? "Stock is staying out longer, so less comes back to install again." : "Jobs are turning faster, so more stock comes back."}`
     : "";
-  const kpis = familyMode
+  const kpis = nationalMode
+    ? [
+        ["Peak SF units", num(Math.round(natPeakUnits)), "", TIPS.timelineForecast],
+        ["Required at target", num(natTot.required || 0), "", TIPS.required],
+        ["Total + on order", num(natTot.cover || 0), "", TIPS.cover],
+        ["Shortfall", num(natTot.shortfall || 0), cls(-(natTot.shortfall || 0)), TIPS.shortfall],
+        ["States", (nat.statesUsed || []).join(" · ") || "—", "", "States whose submitted Sales Forecast is in this national view."],
+        ["Now in service", num(natTot.inService || 0), "", TIPS.nowInService],
+      ]
+    : familyMode
     ? [
         ["Forecast max IS", num(fam.forecastMax), "", TIPS.forecastMax],
         ["Required at target", num(fam.required), "", TIPS.required],
@@ -973,20 +1024,21 @@ function drawDemand() {
   $("view-demand").innerHTML = `
     <div class="demand-head">
       <div class="seg" id="demandScope">
-        <button data-scope="item" class="${familyMode?"":"on"}">${esc(it.code)}</button>
+        <button data-scope="item" class="${!familyMode && !nationalMode?"on":""}">${esc(it.code)}</button>
         <button data-scope="family" class="${familyMode?"on":""}">${esc(it.family || "Family")}${fam.itemCount ? " · " + fam.itemCount : ""}</button>
+        <button data-scope="national" class="${nationalMode?"on":""}"${tipAttr("Submitted Sales Forecast for this family across every state that has filed. Not Forecast Orders.", "National")}>National</button>
       </div>
     </div>
     <div class="why">
-      <p><b>${familyMode ? esc(fam.name) : esc(it.code)}</b> · ${familyMode ? num(fam.itemCount) + " items" : esc(it.name) + " · " + esc(it.family)}</p>
+      <p><b>${nationalMode ? "National · " + esc(nat.name || fam.name || "") : familyMode ? esc(fam.name) : esc(it.code)}</b> · ${nationalMode ? esc((nat.statesUsed || []).join(" + ")) : familyMode ? num(fam.itemCount) + " items · " + esc(state) : esc(it.name) + " · " + esc(it.family)}</p>
       <p>${why}${peakWhy}${durWhy}</p>
-      <p class="muted">${familyMode ? "Family totals sum each item’s units (LM × that item’s qty/m). Hires are not summed — the same job uses many items." : esc(d.note)} Source ${esc(d.sfFile)}${d.sfExport ? " · " + esc(d.sfExport) : ""}.</p>
+      <p class="muted">${nationalMode ? "Submitted Sales Forecast LM × each state’s qty/m for this family, then summed. Forecast Orders (GM-adjusted) is not used for the bars." : (familyMode ? "This state’s family only. Family totals sum each item’s units (LM × that item’s qty/m). Hires are not summed — the same job uses many items." : esc(d.note)) + " Source " + esc(d.sfFile) + (d.sfExport ? " · " + esc(d.sfExport) : "") + "."}</p>
     </div>
     <div class="cards">
       ${kpis.map(([label, val, klass, def]) => kpiCard(label, val, klass, def)).join("")}
     </div>
-    ${familyMode ? familyTimelineBlock(fam) : firmBlock(d)}
-    <h2>Demand over the forecast period</h2>
+    ${nationalMode ? familyTimelineBlock({ ...nat, name: nat.name || fam.name, timelineStates: nat.statesUsed }) + nationalStateTable(nat) : familyMode ? familyTimelineBlock(fam) : firmBlock(d)}
+    ${nationalMode ? "" : `<h2>Demand over the forecast period</h2>
     <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan line is waiting customer POs timed to expected hire month."}</p>
     ${demandChart(months, refs)}
     ${familyMode ? "" : durationBlock(d)}
@@ -1110,9 +1162,12 @@ function drawDemand() {
           </tr>`;
         }).join("")}</tbody>
       </table>
-    </div>`}`;
+    </div>`}
+    `}
+  `;
   $("demandScope").onclick = (e) => {
-    const s = e.target.dataset.scope;
+    const btn = e.target.closest("[data-scope]");
+    const s = btn && btn.dataset.scope;
     if (!s || s === demandScope) return;
     demandScope = s;
     drawDemand();
