@@ -706,6 +706,10 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
   };
 }
 
+function monthKeyFromDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function buildConversion(companies, months, peak) {
   const byMonth = (months || []).map((m) => ({
     index: m.index,
@@ -713,6 +717,7 @@ function buildConversion(companies, months, peak) {
     key: String(m.date || "").slice(0, 7),
     forecastOut: m.outUnits || 0,
     poUnits: 0,
+    projUnits: 0,
   }));
   const monthIx = {};
   byMonth.forEach((m, i) => {
@@ -722,6 +727,7 @@ function buildConversion(companies, months, peak) {
   let firmUnits = 0;
   let dayS = 0;
   let dayW = 0;
+  const today = new Date();
   const withFirm = (companies || []).map((c) => {
     const po = c.po || {};
     const rate = c.outLm > 0 ? c.units / c.outLm : 0;
@@ -738,15 +744,33 @@ function buildConversion(companies, months, peak) {
       const d = new Date(iso);
       if (Number.isNaN(d.getTime())) continue;
       d.setDate(d.getDate() + Math.round(lag));
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const key = monthKeyFromDate(d);
       if (monthIx[key] != null) byMonth[monthIx[key]].poUnits += unitPerHire;
+    }
+    const raiseRate = Number(po.raiseRate) || 0;
+    if (raiseRate > 0 && unitPerHire > 0) {
+      for (let i = 0; i < 4; i++) {
+        const raiseMid = new Date(today.getFullYear(), today.getMonth() + i, 15);
+        let expected = raiseRate;
+        if (i === 0) expected = Math.max(0, raiseRate - (po.raisedThisMonth || 0));
+        if (expected <= 0) continue;
+        const hire = new Date(raiseMid);
+        hire.setDate(hire.getDate() + Math.round(lag));
+        const key = monthKeyFromDate(hire);
+        const slot = monthIx[key] != null ? byMonth[monthIx[key]] : null;
+        if (slot && slot.index >= 3) slot.projUnits += expected * unitPerHire;
+      }
     }
     return { ...c, firmUnits: fu };
   });
   const peakOut = peak && peak.outUnits ? peak.outUnits : 0;
   const peakKey = peak && peak.date ? String(peak.date).slice(0, 7) : "";
   const peakPoUnits = (byMonth.find((m) => m.key === peakKey) || {}).poUnits || 0;
-  const firmPct = peakOut > 0 ? peakPoUnits / peakOut : null;
+  const buyMonths = byMonth.filter((m) => m.index >= 3);
+  const buyOut = buyMonths.reduce((s, m) => s + (m.forecastOut || 0), 0);
+  const buyProj = buyMonths.reduce((s, m) => s + (m.projUnits || 0), 0);
+  const buyPo = buyMonths.reduce((s, m) => s + (m.poUnits || 0), 0);
+  const firmPct = buyOut > 0 ? buyProj / buyOut : null;
   let confidence = "no-data";
   if (firmPct != null) {
     if (firmPct >= 0.7) confidence = "firm";
@@ -758,8 +782,13 @@ function buildConversion(companies, months, peak) {
     firmUnits,
     peakPoUnits,
     peakOut,
+    buyOut,
+    buyProj,
+    buyPo,
+    buyKeys: buyMonths.map((m) => m.key),
     firmPct,
     avgDays: dayW ? dayS / dayW : null,
+    leadMonths: 4,
     confidence,
     months: byMonth,
     companies: withFirm,
@@ -902,7 +931,8 @@ async function buildDemand(state, month, code) {
     companiesOut = attachPos(companies, posMap);
     conversion = buildConversion(companiesOut, trajectory, peak);
     companiesOut = conversion.companies;
-    poSource = "Live ERP contracts (last 12 months). Days = Date raised → on hire. Firm units = waiting POs × avg LM/hire × qty/m.";
+    poSource =
+      "Live ERP contracts (last 12 months). Waiting POs = already raised, not yet on hire. Projected POs = each builder’s recent raise rate, timed by their days-to-on-hire, onto months 3–4 (4-month stock lead).";
   } catch (err) {
     poSource = `Customer POs unavailable: ${err.message}`;
   }

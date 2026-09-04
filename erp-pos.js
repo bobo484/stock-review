@@ -56,6 +56,10 @@ function emptyPos() {
     latestRaised: null,
     poNumbers: [],
     waitingRaised: [],
+    raiseRate: 0,
+    raise3: 0,
+    raise12: 0,
+    raisedThisMonth: 0,
   };
 }
 
@@ -110,6 +114,9 @@ async function loadCompanyPos(state, productCodes) {
         dayN: 0,
         pos: [],
         waitingRaised: [],
+        raise3: 0,
+        raise12: 0,
+        raisedThisMonth: 0,
       };
     }
     const rec = map[k];
@@ -127,6 +134,14 @@ async function loadCompanyPos(state, productCodes) {
       if (!onHire) {
         rec.waiting += 1;
         if (raised && !Number.isNaN(raised.getTime())) rec.waitingRaised.push(raised.toISOString());
+      }
+      if (raised && !Number.isNaN(raised.getTime())) {
+        rec.raise12 += 1;
+        if (raised.getTime() >= Date.now() - 90 * 86400000) rec.raise3 += 1;
+        const now = new Date();
+        if (raised.getFullYear() === now.getFullYear() && raised.getMonth() === now.getMonth()) {
+          rec.raisedThisMonth += 1;
+        }
       }
     }
     if (raised && onHire && !Number.isNaN(raised.getTime()) && !Number.isNaN(onHire.getTime())) {
@@ -154,6 +169,10 @@ async function loadCompanyPos(state, productCodes) {
       latestRaised: rec.pos[0] && rec.pos[0].raised ? isoDay(rec.pos[0].raised) : null,
       poNumbers: uniq,
       waitingRaised: rec.waitingRaised.slice(0, 400),
+      raise3: rec.raise3,
+      raise12: rec.raise12,
+      raisedThisMonth: rec.raisedThisMonth,
+      raiseRate: rec.raise3 >= 2 ? rec.raise3 / 3 : rec.raise12 / 12,
     };
     out[k] = payload;
     out[normName(rec.company)] = payload;

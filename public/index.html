@@ -181,10 +181,11 @@ const TIPS = {
   shortfall: "Required − cover. Positive means you are short; that is the system-requested buy.",
   proposedBuy: "System-requested units to close the shortfall (SystemRequestedQty).",
   nowInService: "Units of this item on hire right now.",
-  poCover: "Waiting customer POs timed to the peak month, as a % of that month’s forecast OUT starts. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
-  firmWaiting: "All waiting customer POs converted to this item’s units (waiting × avg LM/hire × qty/m). The whole pipeline, not one month.",
-  peakOut: "Forecast units going to new sites in the peak month (LM × qty/m).",
-  conversionDays: "Average days from customer PO date raised to on hire, weighted by firm units. Used to time waiting POs onto the graph.",
+  poCover: "Projected POs for months 3–4 as a % of those months’ forecast OUT. Stock takes ~4 months to arrive, so this is the buy window — not waiting POs that mature in months 2–3. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
+  firmWaiting: "Customer POs already raised and not yet on hire. These usually mature in months 2–3 — too late to buy for. Use stock + current orders.",
+  peakOut: "Submitted Sales Forecast OUT units in months 3–4 — the window a new buy can still serve.",
+  conversionDays: "Average days from customer PO date raised to on hire, weighted by waiting units. Used to time both waiting and projected POs.",
+  projPo: "POs not yet raised. Each builder’s recent raise rate (last 90 days if they raised 2+, else 12-month average), minus raises already booked this month, then shifted by their days-to-on-hire. Only months 3–4 are shown.",
   weightedDays: "Customer-weighted hire duration on this item now (large clients move the number more).",
   priorWeighted: "Same weighted hire duration in the previous Sales Forecast month.",
   daysChange: "Change in weighted hire days versus last forecast. Longer means stock stays out and less comes back to install again.",
@@ -194,7 +195,7 @@ const TIPS = {
   netHeld: "OUT − IN. Extra stock the fleet must hold that month. Negative (purple) means more is returning than starting.",
   netReleased: "IN greater than OUT — stock coming back, not extra held.",
   projectedIS: "Projected in-service if the monthly OUT/IN path is followed.",
-  poBacked: "Waiting customer POs converted to this item’s units and timed to expected hire month (date raised + that builder’s avg days).",
+  poBacked: "Waiting customer POs already in ERP, timed to expected hire month (date raised + that builder’s avg days). Usually months 2–3 — too late for a 4-month buy.",
   requiredLine: "Dashed line: fleet required at target utilisation.",
   coverLine: "Dashed line: total stock + current orders you already have.",
   workingDays: "Working days in that forecast month.",
@@ -1045,12 +1046,12 @@ function mergePoMonths(months, conversion) {
   const map = {};
   for (const m of conversion.months) {
     const key = m.key || String(m.date || "").slice(0, 7);
-    if (key) map[key] = m.poUnits || 0;
+    if (key) map[key] = { poUnits: m.poUnits || 0, projUnits: m.projUnits || 0 };
   }
-  return (months || []).map((m) => ({
-    ...m,
-    poUnits: map[String(m.date || "").slice(0, 7)] || 0,
-  }));
+  return (months || []).map((m) => {
+    const hit = map[String(m.date || "").slice(0, 7)] || {};
+    return { ...m, poUnits: hit.poUnits || 0, projUnits: hit.projUnits || 0 };
+  });
 }
 
 function firmBlock(d) {
@@ -1059,19 +1060,21 @@ function firmBlock(d) {
   const tone = c.confidence || "no-data";
   const cover = c.firmPct == null ? "—" : Math.round(c.firmPct * 100) + "%";
   const cardTone = tone === "firm" ? "good" : tone === "mixed" ? "flat" : tone === "soft" ? "warn" : "";
+  const win = (c.buyKeys || []).join(" + ") || "months 3–4";
   const sentences = {
-    firm: `Waiting POs timed to the peak month already cover <b>${cover}</b> of those starts (${num(Math.round(c.peakPoUnits || 0))} of ${num(Math.round(c.peakOut))} units). The wider pipeline is ${num(Math.round(c.firmUnits))} units still waiting to go on hire. Treat the calculator ask as firm unless stock + on order already covers it.`,
-    mixed: `Waiting POs timed to the peak month cover <b>${cover}</b> of those starts (${num(Math.round(c.peakPoUnits || 0))} of ${num(Math.round(c.peakOut))}). Another ${num(Math.round(c.firmUnits))} units sit in the pipeline. Use conversion days (${daysf(c.avgDays)}) to judge timing.`,
-    soft: `Waiting POs timed to the peak month cover only <b>${cover}</b> of those starts. Most of the FileMaker ask is still forecast, not yet on a customer PO — go easier on Decision unless duration or cover is already tight. Pipeline waiting: ${num(Math.round(c.firmUnits))} units.`,
-    "no-data": "No waiting customer POs matched for this item yet.",
+    firm: `Projected POs for <b>${esc(win)}</b> cover <b>${cover}</b> of those starts (${num(Math.round(c.buyProj || 0))} of ${num(Math.round(c.buyOut || 0))} units). Stock you buy now arrives in about 4 months, so this is the window that matters. Waiting POs (${num(Math.round(c.firmUnits))} units) mature earlier — use stock + current orders for those.`,
+    mixed: `Projected POs for <b>${esc(win)}</b> cover <b>${cover}</b> of forecast starts (${num(Math.round(c.buyProj || 0))} of ${num(Math.round(c.buyOut || 0))}). Part of the month 3–4 book is still unraised. Waiting POs (${num(Math.round(c.firmUnits))} units, ${daysf(c.avgDays)} to on hire) are too late for this buy.`,
+    soft: `Projected POs for <b>${esc(win)}</b> cover only <b>${cover}</b> of those starts. Builders are not raising POs at a pace that fills months 3–4. Go easier on Decision unless duration or cover is already tight. Waiting POs (${num(Math.round(c.firmUnits))} units) hit months 2–3 and cannot be bought for.`,
+    "no-data": "Not enough PO raise history to project months 3–4 yet.",
   };
   return `
     <h2>Firm demand vs forecast</h2>
-    <p class="muted">Customer POs already raised and not yet on hire, converted to this item’s units (waiting × avg LM/hire × qty/m). Expected hire month = date raised + that builder’s average days to on hire. This does not change the FileMaker formula — it tells you how much of the peak is already contracted.</p>
+    <p class="muted">Stock takes about 4 months to arrive. Cyan = POs already raised (usually months 2–3 — too late to buy). Teal = projected POs from each builder’s recent raise rate, timed by their days-to-on-hire, onto months 3–4. Cover is projected ÷ forecast OUT for those months. This does not change the FileMaker formula.</p>
     <div class="cards">
-      ${kpiCard("PO cover of peak", cover, "", TIPS.poCover, cardTone)}
-      ${kpiCard("Firm units waiting", num(Math.round(c.firmUnits)), "", TIPS.firmWaiting)}
-      ${kpiCard("Peak forecast OUT", num(Math.round(c.peakOut)), "", TIPS.peakOut)}
+      ${kpiCard("Projected cover M3–M4", cover, "", TIPS.poCover, cardTone)}
+      ${kpiCard("Projected units M3–M4", num(Math.round(c.buyProj || 0)), "", TIPS.projPo)}
+      ${kpiCard("Forecast OUT M3–M4", num(Math.round(c.buyOut || 0)), "", TIPS.peakOut)}
+      ${kpiCard("Waiting (too late)", num(Math.round(c.firmUnits)), "", TIPS.firmWaiting)}
       ${kpiCard("Conversion days", c.avgDays == null ? "—" : daysf(c.avgDays), "", TIPS.conversionDays)}
     </div>
     <div class="why ${cardTone ? "card " + cardTone : ""}"><p>${sentences[tone] || sentences["no-data"]}</p></div>
@@ -1200,7 +1203,7 @@ function demandChart(months, refs) {
   const pad = { l: 56, r: 14, t: 18, b: 34 };
   const innerW = W - pad.l - pad.r;
   const innerH = H - pad.t - pad.b;
-  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0, m.poUnits || 0]);
+  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0, m.poUnits || 0, m.projUnits || 0]);
   if (refs) {
     if (refs.required) vals.push(refs.required);
     if (refs.forecastMax) vals.push(refs.forecastMax);
@@ -1222,6 +1225,7 @@ function demandChart(months, refs) {
   let bars = "";
   let linePts = [];
   let poPts = [];
+  let projPts = [];
   (months || []).forEach((m, i) => {
     const cx = pad.l + i * gw + gw / 2;
     const peak = refs && refs.peakIndex === m.index;
@@ -1240,6 +1244,7 @@ function demandChart(months, refs) {
     bars += `<text x="${cx}" y="${H-12}" text-anchor="middle" fill="${peak?"#4f9cf9":"#8b98a5"}" font-size="11">${esc(label)}${peak?" · peak":""}</text>`;
     linePts.push(`${cx},${y(m.projectedInService || 0)}`);
     if (m.poUnits) poPts.push(`${cx},${y(m.poUnits)}`);
+    if (m.projUnits) projPts.push(`${cx},${y(m.projUnits)}`);
   });
   let refsSvg = "";
   const dash = (value, color) => {
@@ -1260,13 +1265,21 @@ function demandChart(months, refs) {
     const cx = pad.l + i * gw + gw / 2;
     return `<circle cx="${cx}" cy="${y(m.poUnits)}" r="4" fill="#39d0d8"/>`;
   }).join("");
+  const projDots = (months || []).map((m, i) => {
+    if (!m.projUnits) return "";
+    const cx = pad.l + i * gw + gw / 2;
+    return `<circle cx="${cx}" cy="${y(m.projUnits)}" r="4" fill="#20c997"/>`;
+  }).join("");
   const poLine = poPts.length
     ? `<polyline fill="none" stroke="#39d0d8" stroke-width="2" stroke-dasharray="4 3" points="${poPts.join(" ")}"/>`
+    : "";
+  const projLine = projPts.length
+    ? `<polyline fill="none" stroke="#20c997" stroke-width="2" stroke-dasharray="6 4" points="${projPts.join(" ")}"/>`
     : "";
   return `<div class="chart">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}${refsSvg}
       <polyline fill="none" stroke="#d29922" stroke-width="2" points="${linePts.join(" ")}"/>${dots}
-      ${poLine}${poDots}
+      ${poLine}${poDots}${projLine}${projDots}
     </svg>
     <div class="legend">
       <span${tipAttr(TIPS.outStarts, "OUT starts")}><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
@@ -1274,7 +1287,8 @@ function demandChart(months, refs) {
       <span${tipAttr(TIPS.netHeld, "NET extra held")}><i class="sw" style="background:#f85149"></i>NET extra held</span>
       <span${tipAttr(TIPS.netReleased, "NET released")}><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
       <span${tipAttr(TIPS.projectedIS, "Projected in service")}><i class="sw" style="background:#d29922"></i>Projected in service</span>
-      <span${tipAttr(TIPS.poBacked, "PO-backed starts")}><i class="sw" style="background:#39d0d8"></i>PO-backed starts</span>
+      <span${tipAttr(TIPS.poBacked, "Waiting POs")}><i class="sw" style="background:#39d0d8"></i>Waiting POs (too late to buy)</span>
+      <span${tipAttr(TIPS.projPo, "Projected POs")}><i class="sw" style="background:#20c997"></i>Projected POs (months 3–4)</span>
       <span${tipAttr(TIPS.requiredLine, "Required")}><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
       <span${tipAttr(TIPS.coverLine, "Stock + on order")}><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
     </div>
@@ -1360,7 +1374,7 @@ function drawDemand() {
     </div>
     ${nationalMode ? familyTimelineBlock({ ...nat, name: nat.name || fam.name, timelineStates: nat.statesUsed }) + nationalStateTable(nat) : familyMode ? familyTimelineBlock(fam) : firmBlock(d)}
     ${nationalMode ? "" : `<h2>Demand over the forecast period</h2>
-    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan line is waiting customer POs timed to expected hire month."}</p>
+    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan = waiting POs (months 2–3, too late to buy). Teal = projected POs for months 3–4 from raise history."}</p>
     ${demandChart(months, refs)}
     ${familyMode ? "" : durationBlock(d)}
     <h2>Monthly starts vs returning</h2>
@@ -1372,7 +1386,7 @@ function drawDemand() {
           ${thTip("Working days", TIPS.workingDays)}
           ${familyMode ? "" : thTip("Hires", TIPS.hires)}
           ${thTip("OUT units", TIPS.outStarts)}
-          ${familyMode ? "" : thTip("PO-backed", TIPS.poBacked)}
+          ${familyMode ? "" : thTip("Waiting POs", TIPS.poBacked) + thTip("Projected POs", TIPS.projPo)}
           ${thTip("IN units", TIPS.inReturning)}
           ${thTip("NET units", TIPS.netHeld)}
           ${thTip("Projected IS", TIPS.projectedIS)}
@@ -1384,7 +1398,7 @@ function drawDemand() {
             ${tdTip(m.workingDays||"—", TIPS.workingDays)}
             ${familyMode ? "" : tdTip(num(m.hires), TIPS.hires)}
             ${tdTip(num(Math.round(m.outUnits)), TIPS.outStarts)}
-            ${familyMode ? "" : tdTip(m.poUnits ? num(Math.round(m.poUnits)) : "—", TIPS.poBacked)}
+            ${familyMode ? "" : tdTip(m.poUnits ? num(Math.round(m.poUnits)) : "—", TIPS.poBacked) + tdTip(m.projUnits ? num(Math.round(m.projUnits)) : "—", TIPS.projPo)}
             ${tdTip(num(Math.round(m.inUnits)), TIPS.inReturning)}
             ${tdTip(num(Math.round(m.netUnits)), TIPS.netHeld, cls(m.netUnits))}
             ${tdTip(num(Math.round(m.projectedInService)), TIPS.projectedIS)}
