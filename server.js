@@ -176,10 +176,10 @@ function sfNum(row, field) {
 }
 
 function sfForecastLm(row, index) {
-  const total = sfNum(row, `Forecast Month${index}_c_TotalLM`);
-  if (total) return total;
   const submitted = sfNum(row, `Forecast Month${index}_c_Submitted_LM`);
   if (submitted) return submitted;
+  const total = sfNum(row, `Forecast Month${index}_c_TotalLM`);
+  if (total) return total;
   const ave = sfNum(row, `Forecast Month${index}_c_TotalLM_UsingAve`);
   if (ave) return ave;
   return sfNum(row, `Forecast Month${index}_TotalLM_Override`);
@@ -480,6 +480,73 @@ function buildFamilyTimeline(familyItems, state, records, monthMeta, productInde
   });
 }
 
+function addTimelineRows(into, rows) {
+  const byKey = {};
+  for (const row of into) byKey[row.key] = row;
+  for (const row of rows || []) {
+    const key = row.key || String(row.date || "").slice(0, 7);
+    if (!key) continue;
+    if (!byKey[key]) {
+      const copy = { ...row, key };
+      into.push(copy);
+      byKey[key] = copy;
+      continue;
+    }
+    const cur = byKey[key];
+    cur.forecastOut += row.forecastOut || 0;
+    cur.forecastLm += row.forecastLm || 0;
+    cur.forecastHires += row.forecastHires || 0;
+    if (row.actualOut != null) cur.actualOut = (cur.actualOut || 0) + row.actualOut;
+    if (row.actualLm != null) cur.actualLm = (cur.actualLm || 0) + row.actualLm;
+    if (row.actualHires != null) cur.actualHires = (cur.actualHires || 0) + row.actualHires;
+    if (cur.actualOut != null) {
+      cur.variance = cur.actualOut - cur.forecastOut;
+      cur.variancePct = cur.forecastOut ? cur.variance / cur.forecastOut : null;
+    }
+  }
+  return into.sort((a, b) => String(a.key).localeCompare(String(b.key)));
+}
+
+function loadCalculatorNearest(state, month) {
+  try {
+    return loadCalculator(state, month);
+  } catch {
+    /* Forecast Orders file may not exist yet — qty/m can come from the last calculator */
+  }
+  let m = month;
+  for (let i = 0; i < 8; i++) {
+    m = prevMonth(m);
+    try {
+      return loadCalculator(state, m);
+    } catch {
+      /* keep walking back */
+    }
+  }
+  return null;
+}
+
+function buildNationalFamilyTimeline(familyName, month) {
+  const combined = [];
+  const statesUsed = [];
+  for (const st of STATES) {
+    let sf;
+    try {
+      sf = loadSalesForecast(st, month);
+    } catch {
+      continue;
+    }
+    const calc = loadCalculatorNearest(st, month);
+    if (!calc) continue;
+    const { monthMeta, productIndex } = indexSalesForecast(sf.records);
+    const familyItems = calc.items.filter((it) => String(it.Family || "") === familyName && String(it.InventoryCode || ""));
+    if (!familyItems.length) continue;
+    const rows = buildFamilyTimeline(familyItems, st, sf.records, monthMeta, productIndex);
+    addTimelineRows(combined, rows);
+    statesUsed.push(st);
+  }
+  return { timeline: combined, statesUsed };
+}
+
 function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, monthCache, records) {
   const familyItems = items.filter((it) => String(it.Family || "") === familyName && String(it.InventoryCode || ""));
   const parts = familyItems.map((it) => computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache));
@@ -649,6 +716,15 @@ async function buildDemand(state, month, code) {
   const trajectory = computed.months;
   const peak = computed.peakMonth;
   const familyDemand = buildFamilyDemand(items, state, item.family, monthMeta, productIndex, monthCache, records);
+  try {
+    const national = buildNationalFamilyTimeline(item.family, month);
+    if (national.timeline.length) {
+      familyDemand.timeline = national.timeline;
+      familyDemand.timelineStates = national.statesUsed;
+    }
+  } catch {
+    familyDemand.timelineStates = [state];
+  }
 
   const peakIdx = peak.index || 1;
   const companyMap = {};

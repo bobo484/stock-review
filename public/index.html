@@ -223,7 +223,7 @@ const TIPS = {
   detailsTab: "National ask grid — stock, surplus, proposed buy, and GM Decision.",
   demandTab: "Why this item is on the ask: forecast starts, POs, hire duration.",
   stocktakesTab: "Last FileMaker stocktake date versus the forecast cache date.",
-  timelineForecast: "Submitted forecast OUT for that month, in this family’s units (LM × each item’s qty/m, then summed).",
+  timelineForecast: "Sales Forecast as submitted (before Forecast Orders / GM adjustments). Family units = submitted LM × each item’s qty/m, then summed.",
   timelineActual: "Actual contracts that went on hire that month, in this family’s units. From FileMaker contract actuals on the Sales Forecast (count × avg LM).",
   timelineVar: "Actual − forecast. Green means more went out than planned; red means the forecast was high.",
   timelineForecastLm: "Submitted forecast lineal metres across hire products that use this family.",
@@ -795,9 +795,9 @@ function familyTimelineChart(rows) {
   return `<div class="chart">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}</svg>
     <div class="legend">
-      <span${tipAttr(TIPS.timelineForecast, "Forecast")}><i class="sw" style="background:#4f9cf9"></i>Forecast (submitted)</span>
+      <span${tipAttr(TIPS.timelineForecast, "Sales Forecast submitted")}><i class="sw" style="background:#4f9cf9"></i>Sales Forecast submitted</span>
       <span${tipAttr(TIPS.timelineActual, "Actual")}><i class="sw" style="background:#3fb950"></i>Actual (on hire)</span>
-      <span${tipAttr("Next four months from this Sales Forecast — no actuals yet.", "Forward forecast")}><i class="sw" style="background:#79b8ff"></i>Forward forecast</span>
+      <span${tipAttr("Next four months from the submitted Sales Forecast — not Forecast Orders.", "Forward Sales Forecast")}><i class="sw" style="background:#79b8ff"></i>Forward Sales Forecast</span>
     </div>
   </div>`;
 }
@@ -806,8 +806,8 @@ function familyTimelineBlock(fam) {
   const rows = fam.timeline || [];
   if (!rows.length) return "";
   return `
-    <h2>6-month timeline — actual vs forecast</h2>
-    <p class="muted">Last two months: FileMaker submitted forecast versus actual contracts on hire. Next four months: this Sales Forecast only. Units = LM × each item’s qty/m, then summed across ${esc(fam.name)}.</p>
+    <h2>6-month timeline — actual vs submitted Sales Forecast</h2>
+    <p class="muted">This is the Sales Forecast as submitted, not Forecast Orders (GM-adjusted). Last two months: submitted SF versus actual on hire. Next four months: submitted SF. ${fam.timelineStates && fam.timelineStates.length ? "States included: " + esc(fam.timelineStates.join(", ")) + "." : ""} Units = submitted LM × each item’s qty/m, then summed across ${esc(fam.name)}. December uses FileMaker’s LM override only if submitted LM is blank.</p>
     ${familyTimelineChart(rows)}
     <div class="table-wrap" style="max-height:none">
       <table>
