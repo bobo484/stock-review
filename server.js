@@ -96,8 +96,8 @@ function suggestedInto(it, state) {
 
 function mapRow(it, state) {
   const landed = num(it.LandedCost);
-  const orderQty = num(it[`${state}_OrderNumber`]);
   const sysQty = num(it[`${state}_SystemRequestedQty`]);
+  const sysCost = sysQty * landed;
   const target = num(it[`${state}_ForcastUtilisation`]) || num(it.UtilisationTarget) || num(it.c_UtilisationTarget);
   return {
     code: String(it.InventoryCode || ""),
@@ -113,10 +113,10 @@ function mapRow(it, state) {
     currentOrders: num(it[`${state}_CurrentOrders`]),
     surplus: num(it[`${state}_Surplus`]),
     forecastMax: num(it[`${state}_ForcastMaxInService`]),
-    orderQty,
-    orderCost: num(it[`${state}_OrderCost`]) || orderQty * landed,
+    orderQty: sysQty,
+    orderCost: sysCost,
     sysQty,
-    sysCost: sysQty * landed,
+    sysCost,
     suggested: suggestedInto(it, state),
     proposedSurplus: num(it[`${state}_ProposedSurplus`]),
     proposedUtil: num(it[`${state}_ProposedUtil`]),
@@ -545,9 +545,9 @@ function familyStockKpis(items, state, familyName, calcFile) {
     inService += r.inService;
     totalStock += r.totalStock;
     currentOrders += r.currentOrders;
-    orderQty += r.orderQty;
-    orderCost += r.orderCost;
-    if (r.orderQty > 0) orderLines += 1;
+    orderQty += r.sysQty;
+    orderCost += r.sysCost;
+    if (r.sysQty > 0) orderLines += 1;
   }
   return {
     state,
@@ -943,16 +943,16 @@ function buildDetails(state, month) {
     r.decision = d == null || d === "" ? null : num(d);
     r.decisionCost = r.decision == null ? 0 : r.decision * r.landed;
   }
-  const orderLines = rows.filter((r) => r.orderQty > 0);
-  const ask = orderLines.reduce((s, r) => s + r.orderCost, 0);
+  const orderLines = rows.filter((r) => r.sysQty > 0);
+  const ask = orderLines.reduce((s, r) => s + r.sysCost, 0);
   const families = {};
   for (const r of rows) {
     const fam = r.family || "(blank)";
     if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
     families[fam].n += 1;
-    if (r.orderQty > 0) {
+    if (r.sysQty > 0) {
       families[fam].orderLines += 1;
-      families[fam].orderCost += r.orderCost;
+      families[fam].orderCost += r.sysCost;
       families[fam].sysCost += r.sysCost;
     }
     families[fam].decisionCost += r.decisionCost;
@@ -969,9 +969,9 @@ function buildDetails(state, month) {
     totals: {
       items: rows.length,
       orderLines: orderLines.length,
-      orderQty: orderLines.reduce((s, r) => s + r.orderQty, 0),
+      orderQty: orderLines.reduce((s, r) => s + r.sysQty, 0),
       orderCost: ask,
-      sysCost: rows.reduce((s, r) => s + r.sysCost, 0),
+      sysCost: ask,
       decisionCost: rows.reduce((s, r) => s + r.decisionCost, 0),
       shortfallLines: rows.filter((r) => r.surplus < 0).length,
     },
@@ -1066,8 +1066,9 @@ function buildNationalDetails(month) {
       row.sysCost += r.sysCost || 0;
       row.decisionCost += r.decisionCost || 0;
       row.byState[st] = {
-        orderQty: r.orderQty || 0,
-        orderCost: r.orderCost || 0,
+        orderQty: r.sysQty || 0,
+        orderCost: r.sysCost || 0,
+        sysQty: r.sysQty || 0,
         sysCost: r.sysCost || 0,
         surplus: r.surplus || 0,
       };
@@ -1076,21 +1077,21 @@ function buildNationalDetails(month) {
   const rows = [...merged.values()].sort((a, b) => a.code.localeCompare(b.code));
   const monthByState = Object.fromEntries(byState.map((s) => [s.state, s.calcMonth]));
   for (const r of rows) {
-    const ranked = STATES.filter((s) => (r.byState[s] || {}).orderQty > 0).sort(
-      (a, b) => (r.byState[b].orderQty || 0) - (r.byState[a].orderQty || 0)
+    const ranked = STATES.filter((s) => (r.byState[s] || {}).sysQty > 0).sort(
+      (a, b) => (r.byState[b].sysQty || 0) - (r.byState[a].sysQty || 0)
     );
     r.topState = ranked[0] || STATES.find((s) => monthByState[s]) || "QLD";
     r.topMonth = monthByState[r.topState] || month;
   }
-  const orderRows = rows.filter((r) => r.orderQty > 0);
+  const orderRows = rows.filter((r) => r.sysQty > 0);
   const families = {};
   for (const r of rows) {
     const fam = r.family || "(blank)";
     if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
     families[fam].n += 1;
-    if (r.orderQty > 0) {
+    if (r.sysQty > 0) {
       families[fam].orderLines += 1;
-      families[fam].orderCost += r.orderCost;
+      families[fam].orderCost += r.sysCost;
       families[fam].sysCost += r.sysCost;
     }
     families[fam].decisionCost += r.decisionCost;
@@ -1108,9 +1109,9 @@ function buildNationalDetails(month) {
     totals: {
       items: rows.length,
       orderLines: orderRows.length,
-      orderQty: orderRows.reduce((s, r) => s + r.orderQty, 0),
-      orderCost: orderRows.reduce((s, r) => s + r.orderCost, 0),
-      sysCost: rows.reduce((s, r) => s + r.sysCost, 0),
+      orderQty: orderRows.reduce((s, r) => s + r.sysQty, 0),
+      orderCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
+      sysCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
       decisionCost: rows.reduce((s, r) => s + r.decisionCost, 0),
       shortfallLines: rows.filter((r) => r.surplus < 0).length,
     },
@@ -1648,30 +1649,29 @@ app.get("/api/export.xlsx", async (req, res) => {
       const data = buildNationalDetails(month);
       const wb = new ExcelJS.Workbook();
       const by = wb.addWorksheet("BY STATE");
-      by.addRow(["System order from each state’s StockCalculator — not a GM Forecast Order."]);
-      by.addRow(["State", "Calculator", "Month", "Exact month", "Order lines", "Order qty", "System order", "System requested"]);
+      by.addRow(["System requested from each state’s StockCalculator — the true shortfall, not a GM Forecast Order."]);
+      by.addRow(["State", "Calculator", "Month", "Exact month", "Lines", "System qty", "System requested"]);
       for (const s of data.byState) {
-        by.addRow([s.state, s.file || "—", s.calcMonth || "—", s.exact ? "Yes" : "Prior file", s.orderLines, s.orderQty, s.orderCost, s.sysCost]);
+        by.addRow([s.state, s.file || "—", s.calcMonth || "—", s.exact ? "Yes" : "Prior file", s.orderLines, s.orderQty, s.sysCost]);
       }
-      by.addRow(["National", "", data.month, "", data.totals.orderLines, data.totals.orderQty, data.totals.orderCost, data.totals.sysCost]);
+      by.addRow(["National", "", data.month, "", data.totals.orderLines, data.totals.orderQty, data.totals.sysCost]);
       const totals = wb.addWorksheet("TOTALS");
-      totals.addRow(["National system order"]);
-      totals.addRow(["Family", "Order lines", "System order", "System requested"]);
+      totals.addRow(["National system requested"]);
+      totals.addRow(["Family", "Lines", "System requested"]);
       for (const f of data.families) {
-        totals.addRow([f.family, f.orderLines, f.orderCost, f.sysCost]);
+        totals.addRow([f.family, f.orderLines, f.sysCost]);
       }
-      totals.addRow(["Grand Total", data.totals.orderLines, data.totals.orderCost, data.totals.sysCost]);
+      totals.addRow(["Grand Total", data.totals.orderLines, data.totals.sysCost]);
       const ws = wb.addWorksheet("DETAILS");
-      ws.addRow(["ITEM CODE", "DESCRIPTION", "FAMILY", "Total Stock", ...STATES.map((s) => `${s} Order $`), "Order Qty", "System order", "System requested"]);
+      ws.addRow(["ITEM CODE", "DESCRIPTION", "FAMILY", "Total Stock", ...STATES.map((s) => `${s} System $`), "System qty", "System requested"]);
       for (const r of data.rows) {
         ws.addRow([
           r.code,
           r.name,
           r.family,
           r.totalStock,
-          ...STATES.map((s) => (r.byState[s] && r.byState[s].orderCost) || null),
-          r.orderQty || null,
-          r.orderCost || null,
+          ...STATES.map((s) => (r.byState[s] && r.byState[s].sysCost) || null),
+          r.sysQty || null,
           r.sysCost || null,
         ]);
       }
@@ -1685,12 +1685,12 @@ app.get("/api/export.xlsx", async (req, res) => {
     const others = STATES.filter((s) => s !== state);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("DETAILS");
-    ws.addRow(Array.from({ length: 22 }, (_, i) => i + 1));
+    ws.addRow(Array.from({ length: 20 }, (_, i) => i + 1));
     const group = ws.addRow([]);
     group.getCell(6).value = state;
-    group.getCell(20).value = "Proposed";
-    ws.mergeCells(2, 6, 2, 19);
-    ws.mergeCells(2, 20, 2, 22);
+    group.getCell(18).value = "Proposed";
+    ws.mergeCells(2, 6, 2, 17);
+    ws.mergeCells(2, 18, 2, 20);
     ws.addRow([
       "ITEM CODE",
       "DESCRIPTION",
@@ -1703,17 +1703,15 @@ app.get("/api/export.xlsx", async (req, res) => {
       "Utilisation",
       "Current Orders",
       "Surplus / Shortfall",
-      "Order Qty",
+      `${state} System Requested Qty`,
       `${others[0]} Suggested`,
       `${others[1]} Suggested`,
       `${others[2]} Suggested`,
       `${state} Decision`,
       `${state} Decision Cost`,
-      `${state} System Requested Qty`,
-      `${state} System Requested Cost`,
       "Surplus / Shortfall",
       "Utilisation",
-      `${state} Order Cost`,
+      `${state} System Requested Cost`,
     ]);
     for (const r of data.rows) {
       ws.addRow([
@@ -1728,17 +1726,15 @@ app.get("/api/export.xlsx", async (req, res) => {
         r.util,
         r.currentOrders,
         r.surplus,
-        r.orderQty || null,
+        r.sysQty || null,
         r.suggested[others[0]] || null,
         r.suggested[others[1]] || null,
         r.suggested[others[2]] || null,
         r.decision,
         r.decisionCost || null,
-        r.sysQty,
-        r.sysCost,
         r.proposedSurplus,
         r.proposedUtil,
-        r.orderCost || null,
+        r.sysCost || null,
       ]);
     }
     ws.getRow(3).font = { bold: true };
@@ -1746,12 +1742,12 @@ app.get("/api/export.xlsx", async (req, res) => {
       c.width = i === 1 ? 36 : i === 3 ? 28 : 14;
     });
     const totals = wb.addWorksheet("TOTALS");
-    totals.addRow(["System Order"]);
-    totals.addRow(["Family", `Sum of ${state} Order Cost`, `Sum of ${state} System Requested Cost`]);
+    totals.addRow(["System Requested"]);
+    totals.addRow(["Family", `Sum of ${state} System Requested Cost`]);
     for (const f of data.families) {
-      totals.addRow([f.family, f.orderCost, f.sysCost]);
+      totals.addRow([f.family, f.sysCost]);
     }
-    totals.addRow(["Grand Total", data.totals.orderCost, data.totals.sysCost]);
+    totals.addRow(["Grand Total", data.totals.sysCost]);
     totals.addRow([]);
     totals.addRow(["Decision"]);
     totals.addRow(["Family", `Sum of ${state} Decision Cost`]);

@@ -87,19 +87,19 @@
 <header>
   <div>
     <h1>Stock Review</h1>
-    <div class="sub">StockCalculator system order from the submitted Sales Forecast. Decision is the GM override — empty until someone types it.</div>
+    <div class="sub">System requested shortfall from the submitted Sales Forecast. Decision is the GM override — empty until someone types it.</div>
   </div>
   <div class="row">
     <div class="seg" id="states"></div>
     <select id="month"></select>
-    <button class="btn" id="onlyOrders" data-tip-title="Order lines only" data-tip="Show only SKUs FileMaker wants you to buy. Turn off to see the whole fleet.">Order lines only</button>
+    <button class="btn" id="onlyOrders" data-tip-title="Shortfall lines only" data-tip="Show only SKUs with a system-requested shortfall. Turn off to see the whole fleet.">Shortfall lines only</button>
     <input type="search" id="q" placeholder="Search code or name" />
     <a class="btn primary" id="export" href="#" data-tip-title="Export Excel" data-tip="Download this state’s Details grid as an Excel file, including Decision values.">Export Excel</a>
   </div>
 </header>
 <div class="wrap">
   <div class="tabs" id="tabs">
-    <button class="on" data-view="details" data-tip-title="Details" data-tip="System-generated order grid — stock, surplus, calculator buy, and GM Decision.">Details</button>
+    <button class="on" data-view="details" data-tip-title="Details" data-tip="System-requested shortfall grid — stock, surplus, and GM Decision.">Details</button>
     <button data-view="demand" id="tabDemand" disabled data-tip-title="Demand" data-tip="Why this item is on the ask: forecast starts, customer POs, and hire duration. Click a row first.">Demand</button>
     <button data-view="stocktakes" data-tip-title="Stocktakes" data-tip="Last FileMaker stocktake date versus the forecast cache date.">Stocktakes</button>
   </div>
@@ -138,15 +138,18 @@ const aud = (n) => (n||0).toLocaleString("en-AU",{style:"currency",currency:"AUD
 const num = (n) => (n||0).toLocaleString("en-AU");
 const pct = (n) => n ? (n*100).toFixed(0)+"%" : "—";
 const cls = (n) => n < 0 ? "neg" : n > 0 ? "pos" : "";
+const buyQty = (r) => (r && (r.sysQty || 0)) || 0;
+const buyCost = (r) => (r && (r.sysCost || 0)) || 0;
+const onBuy = (r) => buyQty(r) > 0;
 
 const TIPS = {
-  originalAsk: "FileMaker’s system-generated buy for this state and month — Order qty × landed cost from StockCalculator. Not a GM ask. GMs have not submitted Forecast Orders until the lock flag is set.",
-  orderLines: "How many SKUs the calculator generated an order for (order qty greater than zero).",
-  orderQtySum: "Total units on the system-generated order.",
-  shortfallSkus: "Items where stock + current orders is below what target utilisation needs.",
-  systemRequested: "Raw shortfall qty × landed cost (SystemRequestedQty). Usually one unit above the generated order on a line because it uses −surplus before the order-qty rounding.",
+  originalAsk: "True fleet shortfall: SystemRequestedQty × landed cost. Equals max(0, −surplus). Not a GM ask and not FileMaker’s rounded OrderNumber.",
+  orderLines: "How many SKUs have a system-requested shortfall (SystemRequestedQty greater than zero).",
+  orderQtySum: "Total units of system-requested shortfall.",
+  shortfallSkus: "Items where stock + current orders is below what target utilisation needs. Same set as system-requested lines.",
+  systemRequested: "True fleet shortfall: SystemRequestedQty × landed cost. Equals max(0, −surplus).",
   decisionSoFar: "Dollar value of quantities typed in the Decision column. $0 means no GM buy has been entered yet.",
-  familyChip: "Filter the grid to this family. The number is system order lines; the $ is the system-generated order.",
+  familyChip: "Filter the grid to this family. The number is shortfall lines; the $ is system requested.",
   item: "Inventory code. Full name on the grey line. Click the row (not Decision) to open Demand.",
   family: "Product family this item belongs to.",
   landed: "Landed cost per unit — what one more unit costs to buy.",
@@ -157,20 +160,20 @@ const TIPS = {
   target: "FileMaker target utilisation. Required fleet = forecast peak in-service ÷ this target.",
   currentOrders: "Units already on order from suppliers, not yet in the fleet.",
   surplus: "Stock + current orders − required. Negative is a shortfall and drives the proposed buy.",
-  orderQty: "System-generated buy qty for this state (OrderNumber). Same as AdditionalRequired — enough units to cover the shortfall after rounding.",
-  otherSug: "That other state’s FileMaker generated order for the same item — so you can see if they are already buying it.",
-  decision: "Type the qty you actually want to buy. This is the GM override of the system-generated order.",
+  orderQty: "System-requested shortfall qty (SystemRequestedQty). Same as max(0, −surplus).",
+  otherSug: "That other state’s FileMaker suggested buy for the same item — so you can see if they are already covering it.",
+  decision: "Type the qty you actually want to buy. This is the GM override of the system-requested shortfall.",
   decisionCost: "Decision qty × landed cost.",
-  systemQty: "FileMaker SystemRequestedQty — raw shortfall (−surplus). Usually 1 unit above the generated order qty.",
+  systemQty: "FileMaker SystemRequestedQty — the true shortfall (−surplus).",
   systemCost: "SystemRequestedQty × landed cost.",
-  propSurplus: "Surplus after the system-generated buy. Should move toward zero if you take that order.",
-  propUtil: "Utilisation after the system-generated buy and expected demand.",
-  orderCost: "Generated order qty × landed cost for this line.",
+  propSurplus: "Surplus after FileMaker’s proposed columns. Use Decision if you are buying a different qty.",
+  propUtil: "Utilisation after FileMaker’s proposed columns.",
+  orderCost: "System-requested shortfall × landed cost for this line.",
   forecastMax: "FileMaker Forecast Max: peak in-service this item is expected to hit (already on hire + net starts), not the sum of monthly OUT.",
-  required: "Fleet needed at target utilisation: ceil(forecast max ÷ target). This is the stock level the system order is trying to reach.",
+  required: "Fleet needed at target utilisation: ceil(forecast max ÷ target). This is the stock level system requested is trying to reach.",
   cover: "Total stock today + current supplier orders. What you already have or have bought.",
-  shortfall: "Required − cover. Positive means you are short; that is the proposed buy.",
-  proposedBuy: "Units the calculator generated to close the shortfall.",
+  shortfall: "Required − cover. Positive means you are short; that is the system-requested buy.",
+  proposedBuy: "System-requested units to close the shortfall (SystemRequestedQty).",
   nowInService: "Units of this item on hire right now.",
   poCover: "Waiting customer POs timed to the peak month, as a % of that month’s forecast OUT starts. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
   firmWaiting: "All waiting customer POs converted to this item’s units (waiting × avg LM/hire × qty/m). The whole pipeline, not one month.",
@@ -219,9 +222,9 @@ const TIPS = {
   oldestBranch: "Oldest branch last-stocktake date — the weakest count.",
   daysBefore: "Days between the last stocktake and the forecast cache date. Larger = staler at forecast time.",
   stockStatus: "Whether the count was fresh, stale, never done, or after the forecast.",
-  onAsk: "Proposed buy qty if this item is on the ask.",
-  onlyOrders: "Show only SKUs FileMaker wants you to buy. Turn off to see the whole fleet.",
-  detailsTab: "System-generated order grid — stock, surplus, calculator buy, and GM Decision.",
+  onAsk: "System-requested qty if this item has a shortfall.",
+  onlyOrders: "Show only SKUs with a system-requested shortfall. Turn off to see the whole fleet.",
+  detailsTab: "System-requested shortfall grid — stock, surplus, and GM Decision.",
   demandTab: "Why this item is on the ask: forecast starts, POs, hire duration.",
   stocktakesTab: "Last FileMaker stocktake date versus the forecast cache date.",
   timelineForecast: "Sales Forecast as submitted (before Forecast Orders / GM adjustments). Family units = submitted LM × each item’s qty/m, then summed.",
@@ -318,11 +321,11 @@ function isNational() {
 }
 
 function renderControls() {
-  const natTip = tipAttr("Total system-generated Sales Forecast order across every state that has a calculator. Not a GM Forecast Order.", "National");
+  const natTip = tipAttr("Total system-requested shortfall across every state that has a calculator. Not a GM Forecast Order.", "National");
   $("states").innerHTML =
     `<button data-s="${NAT}" class="${isNational()?"on":""}"${natTip}>National</button>` +
     STATES.map(s =>
-      `<button data-s="${s}" class="${s===state?"on":""}"${tipAttr("System-generated order for " + s + ".", s)}>${s}</button>`
+      `<button data-s="${s}" class="${s===state?"on":""}"${tipAttr("System-requested shortfall for " + s + ".", s)}>${s}</button>`
     ).join("");
   $("states").onclick = (e) => {
     const btn = e.target.closest("[data-s]");
@@ -388,10 +391,10 @@ function mergeNationalDetails(wantMonth, parts) {
       cacheDate: d.cacheDate || "",
       forecastSubmitted: d.forecastSubmitted || "",
       orderSubmitted: d.orderSubmitted || "",
-      orderLines: d.totals.orderLines,
-      orderQty: d.totals.orderQty,
-      orderCost: d.totals.orderCost,
-      sysCost: d.totals.sysCost,
+      orderLines: (d.rows || []).filter((r) => (r.sysQty || 0) > 0).length,
+      orderQty: (d.rows || []).reduce((s, r) => s + (r.sysQty || 0), 0),
+      orderCost: (d.rows || []).reduce((s, r) => s + (r.sysCost || 0), 0),
+      sysCost: (d.rows || []).reduce((s, r) => s + (r.sysCost || 0), 0),
       decisionCost: d.totals.decisionCost,
       shortfallLines: d.totals.shortfallLines,
     });
@@ -410,30 +413,30 @@ function mergeNationalDetails(wantMonth, parts) {
       row.totalStock += r.totalStock || 0;
       row.currentOrders += r.currentOrders || 0;
       row.surplus += r.surplus || 0;
-      row.orderQty += r.orderQty || 0;
-      row.orderCost += r.orderCost || 0;
+      row.orderQty += r.sysQty || 0;
+      row.orderCost += r.sysCost || 0;
       row.sysQty += r.sysQty || 0;
       row.sysCost += r.sysCost || 0;
       row.decisionCost += r.decisionCost || 0;
-      row.byState[st] = { orderQty: r.orderQty || 0, orderCost: r.orderCost || 0, sysCost: r.sysCost || 0, surplus: r.surplus || 0 };
+      row.byState[st] = { orderQty: r.sysQty || 0, orderCost: r.sysCost || 0, sysQty: r.sysQty || 0, sysCost: r.sysCost || 0, surplus: r.surplus || 0 };
     }
   }
   const rows = [...merged.values()].sort((a, b) => a.code.localeCompare(b.code));
   const monthByState = Object.fromEntries(byState.map(s => [s.state, s.calcMonth]));
   for (const r of rows) {
-    const ranked = STATES.filter(s => (r.byState[s] || {}).orderQty > 0).sort((a, b) => (r.byState[b].orderQty || 0) - (r.byState[a].orderQty || 0));
+    const ranked = STATES.filter(s => (r.byState[s] || {}).sysQty > 0).sort((a, b) => (r.byState[b].sysQty || 0) - (r.byState[a].sysQty || 0));
     r.topState = ranked[0] || STATES.find(s => monthByState[s]) || "QLD";
     r.topMonth = monthByState[r.topState] || wantMonth;
   }
-  const orderRows = rows.filter(r => r.orderQty > 0);
+  const orderRows = rows.filter(r => r.sysQty > 0);
   const families = {};
   for (const r of rows) {
     const fam = r.family || "(blank)";
     if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
     families[fam].n += 1;
-    if (r.orderQty > 0) {
+    if (r.sysQty > 0) {
       families[fam].orderLines += 1;
-      families[fam].orderCost += r.orderCost;
+      families[fam].orderCost += r.sysCost;
       families[fam].sysCost += r.sysCost;
     }
     families[fam].decisionCost += r.decisionCost;
@@ -451,9 +454,9 @@ function mergeNationalDetails(wantMonth, parts) {
     totals: {
       items: rows.length,
       orderLines: orderRows.length,
-      orderQty: orderRows.reduce((s, r) => s + r.orderQty, 0),
-      orderCost: orderRows.reduce((s, r) => s + r.orderCost, 0),
-      sysCost: rows.reduce((s, r) => s + r.sysCost, 0),
+      orderQty: orderRows.reduce((s, r) => s + r.sysQty, 0),
+      orderCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
+      sysCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
       decisionCost: rows.reduce((s, r) => s + r.decisionCost, 0),
       shortfallLines: rows.filter(r => r.surplus < 0).length,
     },
@@ -652,7 +655,7 @@ function drawStocktakes() {
 function visibleRows() {
   if (!data) return [];
   return data.rows.filter(r => {
-    if (onlyOrders && !(r.orderQty > 0)) return false;
+    if (onlyOrders && !onBuy(r)) return false;
     if (family !== "ALL" && r.family !== family) return false;
     if (q && !(`${r.code} ${r.name}`.toLowerCase().includes(q))) return false;
     return true;
@@ -660,7 +663,7 @@ function visibleRows() {
 }
 
 function stateOrderTip(st) {
-  return "System-generated order $ for " + st + " from that state’s StockCalculator.";
+  return "System-requested shortfall $ for " + st + " from that state’s StockCalculator.";
 }
 
 function draw() {
@@ -674,16 +677,14 @@ function draw() {
   $("banner").textContent =
     `${data.file} · cache ${data.cacheDate || "—"} · submitted ${data.forecastSubmitted || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}`;
   $("kpis").innerHTML = [
-    kpiCard("System order", aud(t.orderCost), "", TIPS.originalAsk),
-    kpiCard("Order lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("Order qty", num(t.orderQty), "", TIPS.orderQtySum),
-    kpiCard("Shortfall SKUs", num(t.shortfallLines), "red", TIPS.shortfallSkus),
     kpiCard("System requested", aud(t.sysCost), "", TIPS.systemRequested),
+    kpiCard("Shortfall lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard("System qty", num(t.orderQty), "", TIPS.orderQtySum),
     kpiCard("Decision so far", aud(t.decisionCost), "", TIPS.decisionSoFar),
   ].join("");
-  const fams = [{family:"ALL", orderLines:t.orderLines, orderCost:t.orderCost}, ...data.families.filter(f => f.orderLines)];
+  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
   $("families").innerHTML = fams.map(f =>
-    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.orderCost)}</button>`
+    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.sysCost)}</button>`
   ).join("");
   $("families").onclick = (e) => {
     const f = e.target.dataset.f;
@@ -699,14 +700,14 @@ function draw() {
       ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}${thTip("Landed", TIPS.landed)}
       ${thTip("On Hand", TIPS.onHand)}${thTip("In Service", TIPS.inService)}${thTip("Total Stock", TIPS.totalStock)}
       ${thTip("Util", TIPS.util)}${thTip("Target", TIPS.target)}${thTip("Current Orders", TIPS.currentOrders)}
-      ${thTip("Surplus", TIPS.surplus)}${thTip("Order Qty", TIPS.orderQty)}
+      ${thTip("Surplus", TIPS.surplus)}${thTip("System qty", TIPS.systemQty)}
       ${thTip(others[0] + " sug.", TIPS.otherSug)}${thTip(others[1] + " sug.", TIPS.otherSug)}${thTip(others[2] + " sug.", TIPS.otherSug)}
       ${thTip("Decision", TIPS.decision)}${thTip("Decision $", TIPS.decisionCost)}
-      ${thTip("System qty", TIPS.systemQty)}${thTip("System $", TIPS.systemCost)}
-      ${thTip("Prop. surplus", TIPS.propSurplus)}${thTip("Prop. util", TIPS.propUtil)}${thTip("Order $", TIPS.orderCost)}
+      ${thTip("System $", TIPS.systemCost)}
+      ${thTip("Prop. surplus", TIPS.propSurplus)}${thTip("Prop. util", TIPS.propUtil)}
     </tr></thead>
     <tbody>${rows.map(r => `
-      <tr class="clickable ${r.orderQty>0?"order":""}" data-code="${esc(r.code)}">
+      <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
         ${tdTip(`<b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div>`, TIPS.item, "", true)}
         ${tdTip(esc(r.family), TIPS.family, "", true)}
         ${tdTip(aud(r.landed), TIPS.landed)}
@@ -717,17 +718,15 @@ function draw() {
         ${tdTip(pct(r.targetUtil), TIPS.target)}
         ${tdTip(num(r.currentOrders), TIPS.currentOrders)}
         ${tdTip(num(r.surplus), TIPS.surplus, cls(r.surplus))}
-        ${tdTip(r.orderQty?num(r.orderQty):"", TIPS.orderQty)}
+        ${tdTip(buyQty(r)?num(buyQty(r)):"", TIPS.systemQty)}
         ${tdTip(r.suggested[others[0]]?num(r.suggested[others[0]]):"", TIPS.otherSug)}
         ${tdTip(r.suggested[others[1]]?num(r.suggested[others[1]]):"", TIPS.otherSug)}
         ${tdTip(r.suggested[others[2]]?num(r.suggested[others[2]]):"", TIPS.otherSug)}
         ${tdTip(`<input class="dec" data-code="${esc(r.code)}" value="${r.decision==null?"":r.decision}" />`, TIPS.decision)}
         ${tdTip(r.decision==null?"":aud(r.decisionCost), TIPS.decisionCost)}
-        ${tdTip(num(r.sysQty), TIPS.systemQty)}
-        ${tdTip(aud(r.sysCost), TIPS.systemCost)}
+        ${tdTip(buyCost(r)?aud(buyCost(r)):"", TIPS.systemCost)}
         ${tdTip(num(r.proposedSurplus), TIPS.propSurplus, cls(r.proposedSurplus))}
         ${tdTip(pct(r.proposedUtil), TIPS.propUtil)}
-        ${tdTip(r.orderQty?aud(r.orderCost):"", TIPS.orderCost)}
       </tr>`).join("")}</tbody>
   </table>`;
   $("grid").querySelectorAll("input.dec").forEach(inp => {
@@ -738,12 +737,11 @@ function draw() {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
   });
   $("totals").innerHTML = `<table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Order lines", TIPS.orderLines)}${thTip("System order", TIPS.originalAsk)}${thTip("System requested", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
-    <tbody>${data.families.filter(f => f.orderLines || f.decisionCost).map(f => `
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Shortfall lines", TIPS.orderLines)}${thTip("System requested", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
+    <tbody>${data.families.filter(f => f.orderLines || f.sysCost || f.decisionCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
         ${tdTip(num(f.orderLines), TIPS.orderLines)}
-        ${tdTip(aud(f.orderCost), TIPS.originalAsk)}
         ${tdTip(aud(f.sysCost), TIPS.systemRequested)}
         ${tdTip(aud(f.decisionCost), TIPS.decisionSoFar)}
       </tr>
@@ -751,7 +749,6 @@ function draw() {
     <tr>
       ${tdTip("<b>Grand total</b>", TIPS.family, "", true)}
       ${tdTip(`<b>${num(t.orderLines)}</b>`, TIPS.orderLines)}
-      ${tdTip(`<b>${aud(t.orderCost)}</b>`, TIPS.originalAsk)}
       ${tdTip(`<b>${aud(t.sysCost)}</b>`, TIPS.systemRequested)}
       ${tdTip(`<b>${aud(t.decisionCost)}</b>`, TIPS.decisionSoFar)}
     </tr>
@@ -763,21 +760,19 @@ function drawNational() {
   const used = (data.byState || []).filter((s) => s.file);
   const prior = used.filter((s) => !s.exact).map((s) => s.state + " " + s.calcMonth);
   $("banner").textContent =
-    `National ${data.month} · system order ${used.map((s) => s.state).join(" + ") || "—"}` +
+    `National ${data.month} · system requested ${used.map((s) => s.state).join(" + ") || "—"}` +
     (data.forecastSubmitted ? ` · SF submitted ${data.forecastSubmitted}` : "") +
     (prior.length ? ` · prior calculator ${prior.join(", ")}` : "") +
     (data.modified ? ` · updated ${new Date(data.modified).toLocaleString("en-AU")}` : "");
   $("kpis").innerHTML = [
-    kpiCard("System order", aud(t.orderCost), "", TIPS.originalAsk),
-    kpiCard("Order lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("Order qty", num(t.orderQty), "", TIPS.orderQtySum),
-    kpiCard("Shortfall SKUs", num(t.shortfallLines), "red", TIPS.shortfallSkus),
     kpiCard("System requested", aud(t.sysCost), "", TIPS.systemRequested),
-    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national system order."),
+    kpiCard("Shortfall lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard("System qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national system-requested total."),
   ].join("");
-  const fams = [{family:"ALL", orderLines:t.orderLines, orderCost:t.orderCost}, ...data.families.filter(f => f.orderLines)];
+  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
   $("families").innerHTML = fams.map(f =>
-    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.orderCost)}</button>`
+    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.sysCost)}</button>`
   ).join("");
   $("families").onclick = (e) => {
     const f = e.target.closest("[data-f]");
@@ -792,33 +787,31 @@ function drawNational() {
       ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}
       ${thTip("Total Stock", TIPS.totalStock)}
       ${STATES.map((s) => thTip(s + " $", stateOrderTip(s))).join("")}
-      ${thTip("Order Qty", TIPS.orderQty)}${thTip("System order", TIPS.originalAsk)}${thTip("System requested", TIPS.systemRequested)}
+      ${thTip("System qty", TIPS.systemQty)}${thTip("System requested", TIPS.systemRequested)}
     </tr></thead>
     <tbody>${rows.map(r => `
-      <tr class="clickable ${r.orderQty>0?"order":""}" data-code="${esc(r.code)}">
+      <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
         ${tdTip(`<b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div>`, TIPS.item, "", true)}
         ${tdTip(esc(r.family), TIPS.family, "", true)}
         ${tdTip(`<b>${num(r.totalStock)}</b>`, TIPS.totalStock)}
-        ${STATES.map((s) => tdTip((r.byState[s] && r.byState[s].orderCost) ? aud(r.byState[s].orderCost) : "", stateOrderTip(s))).join("")}
-        ${tdTip(r.orderQty?num(r.orderQty):"", TIPS.orderQty)}
-        ${tdTip(r.orderCost?aud(r.orderCost):"", TIPS.originalAsk)}
-        ${tdTip(r.sysCost?aud(r.sysCost):"", TIPS.systemRequested)}
+        ${STATES.map((s) => tdTip((r.byState[s] && r.byState[s].sysCost) ? aud(r.byState[s].sysCost) : "", stateOrderTip(s))).join("")}
+        ${tdTip(buyQty(r)?num(buyQty(r)):"", TIPS.systemQty)}
+        ${tdTip(buyCost(r)?aud(buyCost(r)):"", TIPS.systemRequested)}
       </tr>`).join("")}</tbody>
   </table>`;
   $("grid").querySelectorAll("tr[data-code]").forEach((tr) => {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
   });
   $("totals").innerHTML = `
-    <h2>By state — system-generated Sales Forecast order</h2>
-    <p class="muted">Each state’s StockCalculator order for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
+    <h2>By state — system-requested shortfall</h2>
+    <p class="muted">Each state’s StockCalculator system requested for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
     <table>
       <thead><tr>
         ${thTip("State", "State included in the national total.", true)}
-        ${thTip("Calculator", "StockCalculator file used for that state’s generated order.")}
+        ${thTip("Calculator", "StockCalculator file used for that state’s system requested.")}
         ${thTip("Month", "Calculator month. Prior means that state has not filed a calculator for the selected month yet.")}
-        ${thTip("Order lines", TIPS.orderLines)}
-        ${thTip("Order qty", TIPS.orderQtySum)}
-        ${thTip("System order", TIPS.originalAsk)}
+        ${thTip("Shortfall lines", TIPS.orderLines)}
+        ${thTip("System qty", TIPS.orderQtySum)}
         ${thTip("System requested", TIPS.systemRequested)}
       </tr></thead>
       <tbody>${(data.byState || []).map((s) => `
@@ -828,35 +821,31 @@ function drawNational() {
           ${tdTip(s.missing ? "—" : (s.exact ? s.calcMonth : (s.calcMonth || "—") + " · prior"), "Calculator month.")}
           ${tdTip(s.missing ? "—" : num(s.orderLines), TIPS.orderLines)}
           ${tdTip(s.missing ? "—" : num(s.orderQty), TIPS.orderQtySum)}
-          ${tdTip(s.missing ? "—" : aud(s.orderCost), TIPS.originalAsk)}
           ${tdTip(s.missing ? "—" : aud(s.sysCost), TIPS.systemRequested)}
         </tr>`).join("")}
         <tr>
-          ${tdTip("<b>National</b>", "Sum of the state system orders.", "", true)}
+          ${tdTip("<b>National</b>", "Sum of the state system-requested shortfalls.", "", true)}
           ${tdTip("", "")}
           ${tdTip(`<b>${esc(data.month)}</b>`, "Selected forecast month.")}
           ${tdTip(`<b>${num(t.orderLines)}</b>`, TIPS.orderLines)}
           ${tdTip(`<b>${num(t.orderQty)}</b>`, TIPS.orderQtySum)}
-          ${tdTip(`<b>${aud(t.orderCost)}</b>`, TIPS.originalAsk)}
           ${tdTip(`<b>${aud(t.sysCost)}</b>`, TIPS.systemRequested)}
         </tr>
       </tbody>
     </table>
     <h2>By family</h2>
     <table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Order lines", TIPS.orderLines)}${thTip("System order", TIPS.originalAsk)}${thTip("System requested", TIPS.systemRequested)}</tr></thead>
-    <tbody>${data.families.filter(f => f.orderLines).map(f => `
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Shortfall lines", TIPS.orderLines)}${thTip("System requested", TIPS.systemRequested)}</tr></thead>
+    <tbody>${data.families.filter(f => f.orderLines || f.sysCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
         ${tdTip(num(f.orderLines), TIPS.orderLines)}
-        ${tdTip(aud(f.orderCost), TIPS.originalAsk)}
         ${tdTip(aud(f.sysCost), TIPS.systemRequested)}
       </tr>
     `).join("")}
     <tr>
       ${tdTip("<b>Grand total</b>", TIPS.family, "", true)}
       ${tdTip(`<b>${num(t.orderLines)}</b>`, TIPS.orderLines)}
-      ${tdTip(`<b>${aud(t.orderCost)}</b>`, TIPS.originalAsk)}
       ${tdTip(`<b>${aud(t.sysCost)}</b>`, TIPS.systemRequested)}
     </tr>
     </tbody></table>`;
@@ -1250,10 +1239,10 @@ function drawDemand() {
   const why = nationalMode
     ? `${esc(nat.name || fam.name || "Family")} national view uses submitted Sales Forecast from ${(nat.statesUsed || []).join(", ") || "no states yet"} — not Forecast Orders. Peak submitted starts are ${num(Math.round(natPeakUnits))} family units${natPeakRow.key ? " in " + esc(natPeakRow.key) : ""}. System required from each state’s latest calculator is ${num(natTot.required || 0)}; stock + on order cover ${num(natTot.cover || 0)}, shortfall ${num(natTot.shortfall || 0)}.`
     : familyMode
-    ? `${esc(fam.name)} is ${num(fam.itemCount)} items in ${esc(state)}. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. Proposed buy across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} order lines).`
+    ? `${esc(fam.name)} is ${num(fam.itemCount)} items in ${esc(state)}. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. System requested across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} shortfall lines).`
     : (it.orderQty > 0)
-      ? `${it.code} is on the ask because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so the calculator proposes buying ${num(it.orderQty)}.`
-      : `${it.code} is not on the ask. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
+      ? `${it.code} has a system-requested shortfall because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so system requested is ${num(it.orderQty)}.`
+      : `${it.code} has no system-requested shortfall. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
   const peakWhy = !nationalMode && peak.outUnits
     ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}.`
     : "";
@@ -1276,7 +1265,7 @@ function drawDemand() {
         ["Required at target", num(fam.required), "", TIPS.required],
         ["Total + on order", num(fam.cover), "", TIPS.cover],
         ["Shortfall", num(fam.shortfall), cls(-fam.shortfall), TIPS.shortfall],
-        ["Proposed buy", fam.orderQty ? num(fam.orderQty) : "—", "", TIPS.proposedBuy],
+        ["System requested", fam.orderQty ? num(fam.orderQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(fam.inService), "", TIPS.nowInService],
       ]
     : [
@@ -1284,7 +1273,7 @@ function drawDemand() {
         ["Required at target", num(d.required), "", TIPS.required],
         ["Total + on order", num(d.cover), "", TIPS.cover],
         ["Shortfall", num(d.shortfall), cls(-d.shortfall), TIPS.shortfall],
-        ["Proposed buy", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
+        ["System requested", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(it.inService), "", TIPS.nowInService],
       ];
   const refs = {
@@ -1345,12 +1334,12 @@ function drawDemand() {
     </div>
     ${familyMode ? `
     <h2>Items in ${esc(fam.name)}</h2>
-    <p class="muted">Click an item to open its own demand. Sorted by proposed buy, then peak starts.</p>
+    <p class="muted">Click an item to open its own demand. Sorted by system requested, then peak starts.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
           ${thTip("Item", TIPS.item, true)}${thTip("Forecast max", TIPS.forecastMax)}${thTip("Required", TIPS.required)}${thTip("Cover", TIPS.cover)}
-          ${thTip("Shortfall", TIPS.shortfall)}${thTip("Proposed buy", TIPS.proposedBuy)}${thTip("Buy $", TIPS.orderCost)}
+          ${thTip("Shortfall", TIPS.shortfall)}${thTip("System requested", TIPS.proposedBuy)}${thTip("System $", TIPS.orderCost)}
           ${thTip("Peak OUT", TIPS.peakOut)}${thTip("Now IS", TIPS.nowInService)}${thTip("Total stock", TIPS.totalStock)}
         </tr></thead>
         <tbody>${(fam.members||[]).map(m => `
