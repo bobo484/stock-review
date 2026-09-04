@@ -728,6 +728,16 @@ function buildConversion(companies, months, peak) {
   let dayS = 0;
   let dayW = 0;
   const today = new Date();
+  const last = byMonth[byMonth.length - 1];
+  const lastStart = last && last.key ? new Date(`${last.key}-01T00:00:00`) : null;
+  const afterLast = lastStart ? new Date(lastStart.getFullYear(), lastStart.getMonth() + 1, 1) : null;
+  const leadMonths = 4;
+  const beyondByKey = {};
+  const monthOffset = (key) => {
+    const [y, m] = String(key || "").split("-").map(Number);
+    if (!y || !m) return 99;
+    return (y - today.getFullYear()) * 12 + (m - 1 - today.getMonth());
+  };
   const withFirm = (companies || []).map((c) => {
     const po = c.po || {};
     const rate = c.outLm > 0 ? c.units / c.outLm : 0;
@@ -759,6 +769,9 @@ function buildConversion(companies, months, peak) {
         const key = monthKeyFromDate(hire);
         const slot = monthIx[key] != null ? byMonth[monthIx[key]] : null;
         if (slot && slot.index >= 3) slot.projUnits += expected * unitPerHire;
+        else if (afterLast && hire >= afterLast && monthOffset(key) <= leadMonths) {
+          beyondByKey[key] = (beyondByKey[key] || 0) + expected * unitPerHire;
+        }
       }
     }
     return { ...c, firmUnits: fu };
@@ -767,9 +780,15 @@ function buildConversion(companies, months, peak) {
   const peakKey = peak && peak.date ? String(peak.date).slice(0, 7) : "";
   const peakPoUnits = (byMonth.find((m) => m.key === peakKey) || {}).poUnits || 0;
   const buyMonths = byMonth.filter((m) => m.index >= 3);
+  const beyondMonths = Object.keys(beyondByKey).sort().map((k) => ({
+    key: k,
+    projUnits: beyondByKey[k],
+  }));
+  const beyondUnits = beyondMonths.reduce((s, m) => s + (m.projUnits || 0), 0);
   const buyOut = buyMonths.reduce((s, m) => s + (m.forecastOut || 0), 0);
-  const buyProj = buyMonths.reduce((s, m) => s + (m.projUnits || 0), 0);
+  const buyProj = buyMonths.reduce((s, m) => s + (m.projUnits || 0), 0) + beyondUnits;
   const buyPo = buyMonths.reduce((s, m) => s + (m.poUnits || 0), 0);
+  const beyondKey = beyondMonths[0] ? beyondMonths[0].key : (afterLast ? monthKeyFromDate(afterLast) : "");
   const firmPct = buyOut > 0 ? buyProj / buyOut : null;
   let confidence = "no-data";
   if (firmPct != null) {
@@ -785,7 +804,10 @@ function buildConversion(companies, months, peak) {
     buyOut,
     buyProj,
     buyPo,
-    buyKeys: buyMonths.map((m) => m.key),
+    buyKeys: buyMonths.map((m) => m.key).concat(beyondMonths.map((m) => m.key)),
+    beyondUnits,
+    beyondKey,
+    beyondMonths,
     firmPct,
     avgDays: dayW ? dayS / dayW : null,
     leadMonths: 4,

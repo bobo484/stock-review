@@ -77,6 +77,8 @@
   .chart .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;color:var(--muted);font-size:11px}
   .chart .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
   .demand-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+  .chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:18px 0 8px}
+  .chart-head h2{margin:0}
   [data-tip]{cursor:help}
   #hover-tip{
     position:fixed;z-index:9999;max-width:340px;pointer-events:none;
@@ -132,6 +134,7 @@ let view = "details";
 let selectedCode = "";
 let demand = null;
 let demandScope = "item";
+let demandChartMode = "buy";
 let stocktakes = null;
 let staleDays = 14;
 let staleOnly = true;
@@ -181,11 +184,11 @@ const TIPS = {
   shortfall: "Required − cover. Positive means you are short; that is the system-requested buy.",
   proposedBuy: "System-requested units to close the shortfall (SystemRequestedQty).",
   nowInService: "Units of this item on hire right now.",
-  poCover: "Projected POs for months 3–4 as a % of those months’ forecast OUT. Stock takes ~4 months to arrive, so this is the buy window — not waiting POs that mature in months 2–3. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
+  poCover: "Projected POs for months 3–4 (plus any hire after the last forecast month) as a % of those months’ forecast OUT. Stock takes ~4 months to arrive, so this is the buy window — not waiting POs that mature in months 2–3. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
   firmWaiting: "Customer POs already raised and not yet on hire. These usually mature in months 2–3 — too late to buy for. Use stock + current orders.",
   peakOut: "Submitted Sales Forecast OUT units in months 3–4 — the window a new buy can still serve.",
   conversionDays: "Average days from customer PO date raised to on hire, weighted by waiting units. Used to time both waiting and projected POs.",
-  projPo: "POs not yet raised. Each builder’s recent raise rate (last 90 days if they raised 2+, else 12-month average), minus raises already booked this month, then shifted by their days-to-on-hire. Only months 3–4 are shown.",
+  projPo: "POs not yet raised. Each builder’s recent raise rate (last 90 days if they raised 2+, else 12-month average), minus raises already booked this month, then shifted by their days-to-on-hire. Shown on months 3–4 and any month after the forecast if the hire lands later.",
   weightedDays: "Customer-weighted hire duration on this item now (large clients move the number more).",
   priorWeighted: "Same weighted hire duration in the previous Sales Forecast month.",
   daysChange: "Change in weighted hire days versus last forecast. Longer means stock stays out and less comes back to install again.",
@@ -962,6 +965,7 @@ async function openDemand(code) {
     if (!r.ok) throw new Error(j.error || r.statusText);
     demand = j;
     demandScope = "item";
+    demandChartMode = "buy";
     syncUrl(code);
     drawDemand();
   } catch (e) {
@@ -1054,6 +1058,31 @@ function mergePoMonths(months, conversion) {
   });
 }
 
+function appendBeyondMonth(months, conversion) {
+  const extras = (conversion && conversion.beyondMonths && conversion.beyondMonths.length)
+    ? conversion.beyondMonths
+    : (conversion && conversion.beyondUnits
+      ? [{ key: conversion.beyondKey, projUnits: conversion.beyondUnits }]
+      : []);
+  if (!extras.length || !(months || []).length) return months || [];
+  const last = months[months.length - 1];
+  return months.concat(extras.filter((x) => x && x.projUnits).map((x, i) => ({
+    index: (last.index || months.length) + 1 + i,
+    date: x.key ? x.key + "-01" : "",
+    outUnits: 0,
+    inUnits: 0,
+    netUnits: 0,
+    projectedInService: 0,
+    poUnits: 0,
+    projUnits: x.projUnits,
+    beyond: true,
+    workingDays: "",
+    hires: 0,
+    outLm: 0,
+    netLm: 0,
+  })));
+}
+
 function firmBlock(d) {
   const c = d.conversion;
   if (!c) return "";
@@ -1067,9 +1096,12 @@ function firmBlock(d) {
     soft: `Projected POs for <b>${esc(win)}</b> cover only <b>${cover}</b> of those starts. Builders are not raising POs at a pace that fills months 3–4. Go easier on Decision unless duration or cover is already tight. Waiting POs (${num(Math.round(c.firmUnits))} units) hit months 2–3 and cannot be bought for.`,
     "no-data": "Not enough PO raise history to project months 3–4 yet.",
   };
+  const after = c.beyondUnits
+    ? ` ${num(Math.round(c.beyondUnits))} of the projected units hire after ${esc(c.beyondKey || "the last forecast month")} — still in the 4-month arrival window.`
+    : "";
   return `
     <h2>Firm demand vs forecast</h2>
-    <p class="muted">Stock takes about 4 months to arrive. Cyan = POs already raised (usually months 2–3 — too late to buy). Teal = projected POs from each builder’s recent raise rate, timed by their days-to-on-hire, onto months 3–4. Cover is projected ÷ forecast OUT for those months. This does not change the FileMaker formula.</p>
+    <p class="muted">Stock takes about 4 months to arrive. Cyan = POs already raised (usually months 2–3 — too late to buy). Teal = projected POs from each builder’s recent raise rate, timed by their days-to-on-hire, onto months 3–4 and any month after the forecast. Cover is projected ÷ forecast OUT for months 3–4. This does not change the FileMaker formula.</p>
     <div class="cards">
       ${kpiCard("Projected cover M3–M4", cover, "", TIPS.poCover, cardTone)}
       ${kpiCard("Projected units M3–M4", num(Math.round(c.buyProj || 0)), "", TIPS.projPo)}
@@ -1077,7 +1109,7 @@ function firmBlock(d) {
       ${kpiCard("Waiting (too late)", num(Math.round(c.firmUnits)), "", TIPS.firmWaiting)}
       ${kpiCard("Conversion days", c.avgDays == null ? "—" : daysf(c.avgDays), "", TIPS.conversionDays)}
     </div>
-    <div class="why ${cardTone ? "card " + cardTone : ""}"><p>${sentences[tone] || sentences["no-data"]}</p></div>
+    <div class="why ${cardTone ? "card " + cardTone : ""}"><p>${sentences[tone] || sentences["no-data"]}${after}</p></div>
   `;
 }
 
@@ -1198,59 +1230,107 @@ function familyTimelineBlock(fam) {
     </div>`;
 }
 
-function demandChart(months, refs) {
+function chartAxes(W, H, pad, max) {
+  const innerH = H - pad.t - pad.b;
+  const y = (v) => pad.t + innerH - (Math.max(0, v) / max) * innerH;
+  const ticks = 4;
+  let grid = "";
+  for (let i = 0; i <= ticks; i++) {
+    const v = max * (i / ticks);
+    const yy = y(v);
+    grid += `<line x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}" stroke="#2d3845"/>`;
+    grid += `<text x="${pad.l - 6}" y="${yy + 3}" text-anchor="end" fill="#8b98a5" font-size="10">${num(Math.round(v))}</text>`;
+  }
+  return { y, grid, innerH, innerW: W - pad.l - pad.r };
+}
+
+function demandMonthLabel(m, mode, refs) {
+  const key = (m.date || "").slice(0, 7) || ("M" + m.index);
+  if (m.beyond) return key + " · after SF";
+  if (mode === "buy" && m.index >= 3) return key + " · buy";
+  if (mode === "stock" && refs && refs.peakIndex === m.index) return key + " · peak";
+  return key;
+}
+
+function demandBuyChart(months) {
   const W = 760, H = 240;
   const pad = { l: 56, r: 14, t: 18, b: 34 };
-  const innerW = W - pad.l - pad.r;
-  const innerH = H - pad.t - pad.b;
-  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0, m.poUnits || 0, m.projUnits || 0]);
+  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.poUnits || 0, m.projUnits || 0]);
+  const max = Math.max(1, ...vals);
+  const { y, grid, innerH, innerW } = chartAxes(W, H, pad, max);
+  const n = Math.max(1, (months || []).length);
+  const gw = innerW / n;
+  const barW = Math.max(10, gw / 5.2);
+  const gap = 3;
+  let bars = "";
+  (months || []).forEach((m, i) => {
+    const cx = pad.l + i * gw + gw / 2;
+    const buy = m.beyond || m.index >= 3;
+    if (buy) bars += `<rect x="${cx - gw / 2 + 4}" y="${pad.t}" width="${gw - 8}" height="${innerH}" fill="rgba(32,201,151,.08)"/>`;
+    const series = [
+      [m.outUnits || 0, "#4f9cf9"],
+      [m.poUnits || 0, "#39d0d8"],
+      [m.projUnits || 0, "#20c997"],
+    ];
+    const total = series.length * barW + (series.length - 1) * gap;
+    const x0 = cx - total / 2;
+    series.forEach(([v, color], k) => {
+      const x = x0 + k * (barW + gap);
+      bars += `<rect x="${x}" y="${y(v)}" width="${barW}" height="${Math.max(0, y(0) - y(v))}" fill="${color}" rx="2"/>`;
+      if (v > 0 && (k === 2 || v / max > 0.1)) {
+        bars += `<text x="${x + barW / 2}" y="${y(v) - 4}" text-anchor="middle" fill="${color}" font-size="9">${num(Math.round(v))}</text>`;
+      }
+    });
+    bars += `<text x="${cx}" y="${H - 12}" text-anchor="middle" fill="${buy ? "#20c997" : "#8b98a5"}" font-size="11">${esc(demandMonthLabel(m, "buy"))}</text>`;
+  });
+  return `<div class="chart">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}</svg>
+    <div class="legend">
+      <span${tipAttr(TIPS.outStarts, "OUT starts")}><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
+      <span${tipAttr(TIPS.poBacked, "Waiting POs")}><i class="sw" style="background:#39d0d8"></i>Waiting POs (too late to buy)</span>
+      <span${tipAttr(TIPS.projPo, "Projected POs")}><i class="sw" style="background:#20c997"></i>Projected POs (this buy)</span>
+    </div>
+  </div>`;
+}
+
+function demandStockChart(months, refs) {
+  const W = 760, H = 240;
+  const pad = { l: 56, r: 14, t: 18, b: 34 };
+  const vals = (months || []).flatMap((m) => [m.outUnits || 0, m.inUnits || 0, Math.abs(m.netUnits || 0), m.projectedInService || 0]);
   if (refs) {
     if (refs.required) vals.push(refs.required);
     if (refs.forecastMax) vals.push(refs.forecastMax);
     if (refs.cover) vals.push(refs.cover);
   }
   const max = Math.max(1, ...vals);
-  const y = (v) => pad.t + innerH - (Math.max(0, v) / max) * innerH;
+  const { y, grid, innerH, innerW } = chartAxes(W, H, pad, max);
   const n = Math.max(1, (months || []).length);
   const gw = innerW / n;
   const barW = Math.max(8, gw / 6);
-  const ticks = 4;
-  let grid = "";
-  for (let i = 0; i <= ticks; i++) {
-    const v = max * (i / ticks);
-    const yy = y(v);
-    grid += `<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" stroke="#2d3845"/>`;
-    grid += `<text x="${pad.l-6}" y="${yy+3}" text-anchor="end" fill="#8b98a5" font-size="10">${num(Math.round(v))}</text>`;
-  }
   let bars = "";
   let linePts = [];
-  let poPts = [];
-  let projPts = [];
   (months || []).forEach((m, i) => {
     const cx = pad.l + i * gw + gw / 2;
     const peak = refs && refs.peakIndex === m.index;
-    if (peak) bars += `<rect x="${cx-gw/2+4}" y="${pad.t}" width="${gw-8}" height="${innerH}" fill="rgba(79,156,249,.08)"/>`;
+    if (peak) bars += `<rect x="${cx - gw / 2 + 4}" y="${pad.t}" width="${gw - 8}" height="${innerH}" fill="rgba(79,156,249,.08)"/>`;
     const out = m.outUnits || 0;
     const inn = m.inUnits || 0;
     const net = m.netUnits || 0;
-    bars += `<rect x="${cx-barW*1.6}" y="${y(out)}" width="${barW}" height="${Math.max(0, y(0)-y(out))}" fill="#4f9cf9" rx="2"/>`;
-    bars += `<rect x="${cx-barW*0.5}" y="${y(inn)}" width="${barW}" height="${Math.max(0, y(0)-y(inn))}" fill="#3fb950" rx="2"/>`;
+    bars += `<rect x="${cx - barW * 1.6}" y="${y(out)}" width="${barW}" height="${Math.max(0, y(0) - y(out))}" fill="#4f9cf9" rx="2"/>`;
+    bars += `<rect x="${cx - barW * 0.5}" y="${y(inn)}" width="${barW}" height="${Math.max(0, y(0) - y(inn))}" fill="#3fb950" rx="2"/>`;
     const netFill = net >= 0 ? "#f85149" : "#a371f7";
-    bars += `<rect x="${cx+barW*0.6}" y="${y(Math.abs(net))}" width="${barW}" height="${Math.max(0, y(0)-y(Math.abs(net)))}" fill="${netFill}" rx="2"/>`;
+    bars += `<rect x="${cx + barW * 0.6}" y="${y(Math.abs(net))}" width="${barW}" height="${Math.max(0, y(0) - y(Math.abs(net)))}" fill="${netFill}" rx="2"/>`;
     if (net < 0 && Math.abs(net) > 0) {
-      bars += `<text x="${cx+barW*1.1}" y="${y(Math.abs(net))-4}" text-anchor="middle" fill="#a371f7" font-size="9">${signed(net, 0)}</text>`;
+      bars += `<text x="${cx + barW * 1.1}" y="${y(Math.abs(net)) - 4}" text-anchor="middle" fill="#a371f7" font-size="9">${signed(net, 0)}</text>`;
     }
-    const label = (m.date || "").slice(0, 7) || ("M" + m.index);
-    bars += `<text x="${cx}" y="${H-12}" text-anchor="middle" fill="${peak?"#4f9cf9":"#8b98a5"}" font-size="11">${esc(label)}${peak?" · peak":""}</text>`;
+    bars += `<text x="${cx}" y="${H - 12}" text-anchor="middle" fill="${peak ? "#4f9cf9" : "#8b98a5"}" font-size="11">${esc(demandMonthLabel(m, "stock", refs))}</text>`;
     linePts.push(`${cx},${y(m.projectedInService || 0)}`);
-    if (m.poUnits) poPts.push(`${cx},${y(m.poUnits)}`);
-    if (m.projUnits) projPts.push(`${cx},${y(m.projUnits)}`);
   });
   let refsSvg = "";
   const dash = (value, color) => {
     if (!value) return "";
     const yy = y(value);
-    return `<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" stroke="${color}" stroke-dasharray="5 4" stroke-width="1.2"/>`;
+    return `<line x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}" stroke="${color}" stroke-dasharray="5 4" stroke-width="1.2"/>`;
   };
   if (refs) {
     refsSvg += dash(refs.required, "#f85149");
@@ -1260,26 +1340,9 @@ function demandChart(months, refs) {
     const cx = pad.l + i * gw + gw / 2;
     return `<circle cx="${cx}" cy="${y(m.projectedInService || 0)}" r="3.5" fill="#d29922"/>`;
   }).join("");
-  const poDots = (months || []).map((m, i) => {
-    if (!m.poUnits) return "";
-    const cx = pad.l + i * gw + gw / 2;
-    return `<circle cx="${cx}" cy="${y(m.poUnits)}" r="4" fill="#39d0d8"/>`;
-  }).join("");
-  const projDots = (months || []).map((m, i) => {
-    if (!m.projUnits) return "";
-    const cx = pad.l + i * gw + gw / 2;
-    return `<circle cx="${cx}" cy="${y(m.projUnits)}" r="4" fill="#20c997"/>`;
-  }).join("");
-  const poLine = poPts.length
-    ? `<polyline fill="none" stroke="#39d0d8" stroke-width="2" stroke-dasharray="4 3" points="${poPts.join(" ")}"/>`
-    : "";
-  const projLine = projPts.length
-    ? `<polyline fill="none" stroke="#20c997" stroke-width="2" stroke-dasharray="6 4" points="${projPts.join(" ")}"/>`
-    : "";
   return `<div class="chart">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}${refsSvg}
       <polyline fill="none" stroke="#d29922" stroke-width="2" points="${linePts.join(" ")}"/>${dots}
-      ${poLine}${poDots}${projLine}${projDots}
     </svg>
     <div class="legend">
       <span${tipAttr(TIPS.outStarts, "OUT starts")}><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
@@ -1287,12 +1350,15 @@ function demandChart(months, refs) {
       <span${tipAttr(TIPS.netHeld, "NET extra held")}><i class="sw" style="background:#f85149"></i>NET extra held</span>
       <span${tipAttr(TIPS.netReleased, "NET released")}><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
       <span${tipAttr(TIPS.projectedIS, "Projected in service")}><i class="sw" style="background:#d29922"></i>Projected in service</span>
-      <span${tipAttr(TIPS.poBacked, "Waiting POs")}><i class="sw" style="background:#39d0d8"></i>Waiting POs (too late to buy)</span>
-      <span${tipAttr(TIPS.projPo, "Projected POs")}><i class="sw" style="background:#20c997"></i>Projected POs (months 3–4)</span>
       <span${tipAttr(TIPS.requiredLine, "Required")}><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
       <span${tipAttr(TIPS.coverLine, "Stock + on order")}><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
     </div>
   </div>`;
+}
+
+function demandCharts(months, refs, familyMode) {
+  if (familyMode || demandChartMode === "stock") return demandStockChart(months, refs);
+  return demandBuyChart(months);
 }
 
 function drawDemand() {
@@ -1308,7 +1374,11 @@ function drawDemand() {
     .reduce((a, b) => ((b.forecastOut || 0) > (a.forecastOut || 0) ? b : a), { forecastOut: 0, key: "" });
   const natPeakUnits = natPeakRow.forecastOut || natTot.peakForecastOut || 0;
   const peak = (familyMode ? fam.peakMonth : d.peakMonth) || {};
-  const months = mergePoMonths(familyMode ? (fam.months || []) : d.months, familyMode ? null : d.conversion);
+  const baseMonths = mergePoMonths(familyMode ? (fam.months || []) : d.months, familyMode ? null : d.conversion);
+  const buyMonths = familyMode ? baseMonths : appendBeyondMonth(baseMonths, d.conversion);
+  const buyMode = !familyMode && demandChartMode !== "stock";
+  const months = buyMode ? buyMonths : baseMonths;
+  const tableMonths = familyMode ? baseMonths : buyMonths;
   const peakLabel = peak.date ? peak.date.slice(0, 7) : `Month ${peak.index}`;
   const why = nationalMode
     ? `${esc(nat.name || fam.name || "Family")} national view uses submitted Sales Forecast from ${(nat.statesUsed || []).join(", ") || "no states yet"} — not Forecast Orders. Peak submitted starts are ${num(Math.round(natPeakUnits))} family units${natPeakRow.key ? " in " + esc(natPeakRow.key) : ""}. System required from each state’s latest calculator is ${num(natTot.required || 0)}; stock + on order cover ${num(natTot.cover || 0)}, shortfall ${num(natTot.shortfall || 0)}.`
@@ -1373,9 +1443,19 @@ function drawDemand() {
       ${kpis.map(([label, val, klass, def]) => kpiCard(label, val, klass, def)).join("")}
     </div>
     ${nationalMode ? familyTimelineBlock({ ...nat, name: nat.name || fam.name, timelineStates: nat.statesUsed }) + nationalStateTable(nat) : familyMode ? familyTimelineBlock(fam) : firmBlock(d)}
-    ${nationalMode ? "" : `<h2>Demand over the forecast period</h2>
-    <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan = waiting POs (months 2–3, too late to buy). Teal = projected POs for months 3–4 from raise history."}</p>
-    ${demandChart(months, refs)}
+    ${nationalMode ? "" : `<div class="chart-head">
+      <h2>${familyMode ? "Demand over the forecast period" : buyMode ? "Buy window" : "Stock path"}</h2>
+      ${familyMode ? "" : `<div class="seg" id="demandChartMode">
+        <button data-chart="buy" class="${buyMode ? "on" : ""}">Buy window</button>
+        <button data-chart="stock" class="${buyMode ? "" : "on"}">Stock path</button>
+      </div>`}
+    </div>
+    <p class="muted">${familyMode
+      ? "All items in " + esc(fam.name) + " — starts, returning stock, net extra held, and projected in-service versus required / cover."
+      : buyMode
+        ? "Decide the buy here. Blue = forecast starts. Cyan = waiting POs already raised — they mature in months 2–3 and fall away by month 4; that is not a demand crash. Teal = projected raises that still land in time for a 4-month buy, including after the last forecast month. Required and cover are on Stock path."
+        : "Starts, returning stock, net extra held, and projected in-service versus required / cover. POs are on Buy window."}</p>
+    ${demandCharts(months, refs, familyMode)}
     ${familyMode ? "" : durationBlock(d)}
     <h2>Monthly starts vs returning</h2>
     <p class="muted">OUT = forecasted site starts (LM × qty/m). IN = returning contracts. NET = extra stock the fleet must hold that month.</p>
@@ -1392,17 +1472,17 @@ function drawDemand() {
           ${thTip("Projected IS", TIPS.projectedIS)}
           ${familyMode ? "" : thTip("OUT LM", TIPS.outLm) + thTip("NET LM", TIPS.netLm)}
         </tr></thead>
-        <tbody>${months.map(m => `
-          <tr class="${m.index===peak.index?"order":""}">
-            ${tdTip(esc((m.date||"").slice(0,7) || ("M"+m.index)) + (m.index===peak.index?" · peak starts":""), "Forecast month. Peak is the strongest new-site starts.", "", true)}
+        <tbody>${tableMonths.map(m => `
+          <tr class="${m.beyond ? "" : m.index===peak.index?"order":""}">
+            ${tdTip(esc((m.date||"").slice(0,7) || ("M"+m.index)) + (m.beyond ? " · after SF" : m.index===peak.index?" · peak starts":""), m.beyond ? "Hire month after the last Sales Forecast month. Projected POs still land here on a 4-month lead." : "Forecast month. Peak is the strongest new-site starts.", "", true)}
             ${tdTip(m.workingDays||"—", TIPS.workingDays)}
-            ${familyMode ? "" : tdTip(num(m.hires), TIPS.hires)}
-            ${tdTip(num(Math.round(m.outUnits)), TIPS.outStarts)}
+            ${familyMode ? "" : tdTip(m.beyond ? "—" : num(m.hires), TIPS.hires)}
+            ${tdTip(m.beyond ? "—" : num(Math.round(m.outUnits)), TIPS.outStarts)}
             ${familyMode ? "" : tdTip(m.poUnits ? num(Math.round(m.poUnits)) : "—", TIPS.poBacked) + tdTip(m.projUnits ? num(Math.round(m.projUnits)) : "—", TIPS.projPo)}
-            ${tdTip(num(Math.round(m.inUnits)), TIPS.inReturning)}
-            ${tdTip(num(Math.round(m.netUnits)), TIPS.netHeld, cls(m.netUnits))}
-            ${tdTip(num(Math.round(m.projectedInService)), TIPS.projectedIS)}
-            ${familyMode ? "" : tdTip(num(Math.round(m.outLm)), TIPS.outLm) + tdTip(num(Math.round(m.netLm)), TIPS.netLm, cls(m.netLm))}
+            ${tdTip(m.beyond ? "—" : num(Math.round(m.inUnits)), TIPS.inReturning)}
+            ${tdTip(m.beyond ? "—" : num(Math.round(m.netUnits)), TIPS.netHeld, m.beyond ? "" : cls(m.netUnits))}
+            ${tdTip(m.beyond ? "—" : num(Math.round(m.projectedInService)), TIPS.projectedIS)}
+            ${familyMode ? "" : tdTip(m.beyond ? "—" : num(Math.round(m.outLm)), TIPS.outLm) + tdTip(m.beyond ? "—" : num(Math.round(m.netLm)), TIPS.netLm, m.beyond ? "" : cls(m.netLm))}
           </tr>`).join("")}</tbody>
       </table>
     </div>
@@ -1506,6 +1586,16 @@ function drawDemand() {
     if (!s || s === demandScope) return;
     demandScope = s;
     drawDemand();
+  };
+  const chartSeg = $("demandChartMode");
+  if (chartSeg) {
+    chartSeg.onclick = (e) => {
+      const btn = e.target.closest("[data-chart]");
+      const mode = btn && btn.dataset.chart;
+      if (!mode || mode === demandChartMode) return;
+      demandChartMode = mode;
+      drawDemand();
+    };
   };
   $("view-demand").querySelectorAll("tr[data-code]").forEach((tr) => {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
