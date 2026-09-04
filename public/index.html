@@ -43,6 +43,10 @@
   th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
   th{position:sticky;top:0;background:var(--panel2);color:var(--muted);font-size:11px;font-weight:650;text-align:right;z-index:1}
   th.l,td.l{text-align:left}
+  th.sortable{cursor:pointer;user-select:none}
+  th.sortable:hover{color:var(--text)}
+  th.sortable.on{color:var(--accent)}
+  th.sortable .sort-mark{font-size:10px;margin-left:3px;opacity:.85}
   tbody tr:hover{background:rgba(79,156,249,.06)}
   tbody tr.order{background:rgba(79,156,249,.04)}
   tbody tr.clickable{cursor:pointer}
@@ -132,6 +136,8 @@ let stocktakes = null;
 let staleDays = 14;
 let staleOnly = true;
 let stockSort = "stale";
+let gridSort = { key: "code", dir: "asc" };
+const TEXT_SORT = new Set(["code", "family"]);
 
 const $ = (id) => document.getElementById(id);
 const aud = (n) => (n||0).toLocaleString("en-AU",{style:"currency",currency:"AUD",maximumFractionDigits:0});
@@ -245,6 +251,57 @@ function kpiCard(label, val, klass, def, cardClass) {
 }
 function thTip(label, def, left) {
   return `<th class="${left ? "l" : ""}"${tipAttr(def, label)}>${esc(label)}</th>`;
+}
+function thSort(label, key, def, left) {
+  const on = gridSort.key === key;
+  const mark = on ? (gridSort.dir === "asc" ? "▲" : "▼") : "";
+  const how = TEXT_SORT.has(key) ? "Click to sort A–Z / Z–A." : "Click to sort high–low / low–high.";
+  return `<th class="sortable${on?" on":""}${left?" l":""}" data-sort="${esc(key)}"${tipAttr((def ? def + " " : "") + how, label)}>${esc(label)}${mark ? `<span class="sort-mark">${mark}</span>` : ""}</th>`;
+}
+function sortValue(r, key) {
+  if (key.startsWith("sug:")) return (r.suggested || {})[key.slice(4)] || 0;
+  if (key.startsWith("st:")) return ((r.byState || {})[key.slice(3)] || {}).sysCost || 0;
+  if (key === "sysQty") return buyQty(r);
+  if (key === "sysCost") return buyCost(r);
+  const v = r[key];
+  if (v == null || v === "") return TEXT_SORT.has(key) ? "" : 0;
+  return v;
+}
+function sortGridRows(rows) {
+  const key = gridSort.key || "code";
+  const dir = gridSort.dir === "asc" ? 1 : -1;
+  const text = TEXT_SORT.has(key);
+  return rows.slice().sort((a, b) => {
+    const av = sortValue(a, key);
+    const bv = sortValue(b, key);
+    const cmp = text
+      ? String(av).localeCompare(String(bv), "en", { numeric: true, sensitivity: "base" })
+      : (Number(av) || 0) - (Number(bv) || 0);
+    if (cmp) return cmp * dir;
+    return String(a.code || "").localeCompare(String(b.code || ""));
+  });
+}
+function setGridSort(key) {
+  if (!key) return;
+  if (gridSort.key === key) gridSort.dir = gridSort.dir === "asc" ? "desc" : "asc";
+  else {
+    gridSort.key = key;
+    gridSort.dir = TEXT_SORT.has(key) ? "asc" : "desc";
+  }
+  const wrap = $("grid");
+  const top = wrap ? wrap.scrollTop : 0;
+  const left = wrap ? wrap.scrollLeft : 0;
+  draw();
+  const after = $("grid");
+  if (after) {
+    after.scrollTop = top;
+    after.scrollLeft = left;
+  }
+}
+function bindGridSort() {
+  $("grid").querySelectorAll("th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => setGridSort(th.dataset.sort));
+  });
 }
 function tdTip(html, def, extra, left) {
   return `<td class="${[left ? "l" : "", extra || ""].filter(Boolean).join(" ")}"${tipAttr(def)}>${html}</td>`;
@@ -654,12 +711,13 @@ function drawStocktakes() {
 
 function visibleRows() {
   if (!data) return [];
-  return data.rows.filter(r => {
+  const rows = data.rows.filter(r => {
     if (onlyOrders && !onBuy(r)) return false;
     if (family !== "ALL" && r.family !== family) return false;
     if (q && !(`${r.code} ${r.name}`.toLowerCase().includes(q))) return false;
     return true;
   });
+  return sortGridRows(rows);
 }
 
 function stateOrderTip(st) {
@@ -697,14 +755,14 @@ function draw() {
   $("grid").className = "table-wrap";
   $("grid").innerHTML = `<table>
     <thead><tr>
-      ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}${thTip("Landed", TIPS.landed)}
-      ${thTip("On Hand", TIPS.onHand)}${thTip("In Service", TIPS.inService)}${thTip("Total Stock", TIPS.totalStock)}
-      ${thTip("Util", TIPS.util)}${thTip("Target", TIPS.target)}${thTip("Current Orders", TIPS.currentOrders)}
-      ${thTip("Surplus", TIPS.surplus)}${thTip("System qty", TIPS.systemQty)}
-      ${thTip(others[0] + " sug.", TIPS.otherSug)}${thTip(others[1] + " sug.", TIPS.otherSug)}${thTip(others[2] + " sug.", TIPS.otherSug)}
-      ${thTip("Decision", TIPS.decision)}${thTip("Decision $", TIPS.decisionCost)}
-      ${thTip("System $", TIPS.systemCost)}
-      ${thTip("Prop. surplus", TIPS.propSurplus)}${thTip("Prop. util", TIPS.propUtil)}
+      ${thSort("Item", "code", TIPS.item, true)}${thSort("Family", "family", TIPS.family, true)}${thSort("Landed", "landed", TIPS.landed)}
+      ${thSort("On Hand", "onHand", TIPS.onHand)}${thSort("In Service", "inService", TIPS.inService)}${thSort("Total Stock", "totalStock", TIPS.totalStock)}
+      ${thSort("Util", "util", TIPS.util)}${thSort("Target", "targetUtil", TIPS.target)}${thSort("Current Orders", "currentOrders", TIPS.currentOrders)}
+      ${thSort("Surplus", "surplus", TIPS.surplus)}${thSort("System qty", "sysQty", TIPS.systemQty)}
+      ${thSort(others[0] + " sug.", "sug:" + others[0], TIPS.otherSug)}${thSort(others[1] + " sug.", "sug:" + others[1], TIPS.otherSug)}${thSort(others[2] + " sug.", "sug:" + others[2], TIPS.otherSug)}
+      ${thSort("Decision", "decision", TIPS.decision)}${thSort("Decision $", "decisionCost", TIPS.decisionCost)}
+      ${thSort("System $", "sysCost", TIPS.systemCost)}
+      ${thSort("Prop. surplus", "proposedSurplus", TIPS.propSurplus)}${thSort("Prop. util", "proposedUtil", TIPS.propUtil)}
     </tr></thead>
     <tbody>${rows.map(r => `
       <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
@@ -736,6 +794,7 @@ function draw() {
   $("grid").querySelectorAll("tr[data-code]").forEach(tr => {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
   });
+  bindGridSort();
   $("totals").innerHTML = `<table>
     <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Shortfall lines", TIPS.orderLines)}${thTip("System requested", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
     <tbody>${data.families.filter(f => f.orderLines || f.sysCost || f.decisionCost).map(f => `
@@ -784,10 +843,10 @@ function drawNational() {
   $("grid").className = "table-wrap national-grid";
   $("grid").innerHTML = `<table>
     <thead><tr>
-      ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}
-      ${thTip("Total Stock", TIPS.totalStock)}
-      ${STATES.map((s) => thTip(s + " $", stateOrderTip(s))).join("")}
-      ${thTip("System qty", TIPS.systemQty)}${thTip("System requested", TIPS.systemRequested)}
+      ${thSort("Item", "code", TIPS.item, true)}${thSort("Family", "family", TIPS.family, true)}
+      ${thSort("Total Stock", "totalStock", TIPS.totalStock)}
+      ${STATES.map((s) => thSort(s + " $", "st:" + s, stateOrderTip(s))).join("")}
+      ${thSort("System qty", "sysQty", TIPS.systemQty)}${thSort("System requested", "sysCost", TIPS.systemRequested)}
     </tr></thead>
     <tbody>${rows.map(r => `
       <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
@@ -802,6 +861,7 @@ function drawNational() {
   $("grid").querySelectorAll("tr[data-code]").forEach((tr) => {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
   });
+  bindGridSort();
   $("totals").innerHTML = `
     <h2>By state — system-requested shortfall</h2>
     <p class="muted">Each state’s StockCalculator system requested for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
