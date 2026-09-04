@@ -747,6 +747,15 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
       peakMonthKey: p.item.peakMonthKey || "",
       buyIs: p.buyIs || 0,
       buyMonthKey: p.item.buyMonthKey || "",
+      months: (p.months || []).map((m) => ({
+        index: m.index,
+        date: m.date,
+        outUnits: m.outUnits || 0,
+        inUnits: m.inUnits || 0,
+        netUnits: m.netUnits || 0,
+        projectedInService: m.projectedInService || 0,
+        inUnfiled: !!m.inUnfiled,
+      })),
     }))
     .sort((a, b) => b.orderCost - a.orderCost || b.peakOut - a.peakOut);
   return {
@@ -1354,6 +1363,23 @@ function parseBranchStock(raw) {
   }
 }
 
+function branchStockLines(raw) {
+  const o = parseBranchStock(raw);
+  const lines = [];
+  for (const [location, v] of Object.entries(o)) {
+    if (!location) continue;
+    const soh = num(v && (v.SOH ?? v.soh ?? v.OnHand ?? v.onHand));
+    const isv = num(v && (v.IS ?? v.is ?? v.inService ?? v.InService));
+    lines.push({
+      location,
+      onHand: soh,
+      inService: isv,
+      negative: soh < 0 || isv < 0,
+    });
+  }
+  return lines;
+}
+
 function findStocktakeCsv() {
   const names = ["LocationItem.csv", "Stocktake.csv", "StockTake.csv", "StocktakeList.csv", "Stock Take.csv"];
   const dirs = [];
@@ -1610,7 +1636,7 @@ function buildStocktakes(state, month, staleDays) {
   for (const it of items) {
     const code = String(it.InventoryCode || "");
     if (!code) continue;
-    byCode[code] = parseBranchStock(it[`${state}_BranchStockJSON`]);
+    byCode[code] = branchStockLines(it[`${state}_BranchStockJSON`]);
   }
   const cacheDate = parseDate(details.cacheDate) || parseDate(`${month}-01`);
   const branches = loadBranchMap();
@@ -1640,8 +1666,10 @@ function buildStocktakes(state, month, staleDays) {
     else if (last > cacheDate) status = "after-forecast";
     else if (daysBefore != null && daysBefore > staleDays) status = "stale";
     else status = "fresh";
-    const branchStock = byCode[r.code] || {};
-    const branchCount = Object.keys(branchStock).length;
+    const branchStock = byCode[r.code] || [];
+    const branchCount = branchStock.length;
+    const negBranches = branchStock.filter((x) => x.negative);
+    const negative = r.onHand < 0 || r.totalStock < 0 || r.inService < 0 || negBranches.length > 0;
     return {
       code: r.code,
       name: r.name,
@@ -1654,6 +1682,12 @@ function buildStocktakes(state, month, staleDays) {
       oldestStocktake: isoDay(oldest),
       daysBeforeForecast: daysBefore,
       status,
+      negative,
+      negBranches: negBranches.slice(0, 8).map((x) => ({
+        location: x.location,
+        onHand: x.onHand,
+        inService: x.inService,
+      })),
       branches: required.length || branchCount,
       neverCounted: lines.length ? required.filter((x) => !x.lastStocktake).length : null,
       notRequired: lines.filter((x) => x.notRequired).length,
@@ -1697,6 +1731,7 @@ function buildStocktakes(state, month, staleDays) {
       notRequired: rows.filter((r) => r.status === "not-required").length,
       onAskStale: stale.filter((r) => r.orderQty > 0).length,
       noData: rows.filter((r) => r.status === "no-data").length,
+      negative: rows.filter((r) => r.negative).length,
     },
     families: Object.values(families).sort((a, b) => b.stale + b.never - (a.stale + a.never) || a.family.localeCompare(b.family)),
     rows,
