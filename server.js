@@ -185,6 +185,34 @@ function sfForecastLm(row, index) {
   return sfNum(row, `Forecast Month${index}_TotalLM_Override`);
 }
 
+function sfLmSource(row, index) {
+  if (sfNum(row, `Forecast Month${index}_c_Submitted_LM`)) return "submitted";
+  if (sfNum(row, `Forecast Month${index}_c_TotalLM`)) return "total";
+  if (sfNum(row, `Forecast Month${index}_c_TotalLM_UsingAve`)) return "ave";
+  if (sfNum(row, `Forecast Month${index}_TotalLM_Override`)) return "override";
+  return "none";
+}
+
+function sumProductMonth(rows, index) {
+  let outLm = 0;
+  let netLm = 0;
+  let hires = 0;
+  let filedLm = 0;
+  let overrideLm = 0;
+  for (const r of rows || []) {
+    const lm = sfForecastLm(r, index);
+    outLm += lm;
+    netLm += sfNum(r, `StockReturning Net Month ${index}_NetRequired`);
+    hires += sfNum(r, `Forecast Month${index}_NoOfHires`);
+    if (lm > 0) {
+      if (sfLmSource(r, index) === "override") overrideLm += lm;
+      else filedLm += lm;
+    }
+  }
+  const inUnfiled = outLm > 0 && netLm === 0 && overrideLm > 0 && filedLm === 0;
+  return { outLm, netLm, hires, inLm: outLm - netLm, inUnfiled };
+}
+
 function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, priorMonthId }) {
   let wDays = 0;
   let w = 0;
@@ -298,17 +326,7 @@ function indexSalesForecast(records) {
 function productMonthCache(productIndex, monthMeta) {
   const cache = {};
   for (const [id, info] of Object.entries(productIndex)) {
-    cache[id] = monthMeta.map((m) => {
-      let outLm = 0;
-      let netLm = 0;
-      let hires = 0;
-      for (const r of info.rows) {
-        outLm += sfForecastLm(r, m.index);
-        netLm += sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`);
-        hires += sfNum(r, `Forecast Month${m.index}_NoOfHires`);
-      }
-      return { outLm, netLm, hires, inLm: outLm - netLm };
-    });
+    cache[id] = monthMeta.map((m) => sumProductMonth(info.rows, m.index));
   }
   return cache;
 }
@@ -323,14 +341,7 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
     const prior = num(priorRates[id]);
     const cached = monthCache && monthCache[id];
     const months = monthMeta.map((m, i) => {
-      const tot = cached
-        ? cached[i]
-        : (() => {
-            const outLm = info.rows.reduce((s, r) => s + sfForecastLm(r, m.index), 0);
-            const netLm = info.rows.reduce((s, r) => s + sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`), 0);
-            const hires = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_NoOfHires`), 0);
-            return { outLm, netLm, hires, inLm: outLm - netLm };
-          })();
+      const tot = cached ? cached[i] : sumProductMonth(info.rows, m.index);
       return {
         index: m.index,
         date: m.date,
@@ -339,6 +350,7 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
         outLm: tot.outLm,
         inLm: tot.inLm,
         netLm: tot.netLm,
+        inUnfiled: !!tot.inUnfiled,
         outUnits: tot.outLm * rate,
         inUnits: tot.inLm * rate,
         netUnits: tot.netLm * rate,
@@ -367,7 +379,10 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
       outUnits: 0,
       inUnits: 0,
       netUnits: 0,
+      inUnfiled: false,
     };
+    let outFiled = 0;
+    let outUnfiled = 0;
     for (const p of products) {
       const pm = p.months[m.index - 1];
       slice.hires += pm.hires;
@@ -377,7 +392,10 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
       slice.outUnits += pm.outUnits;
       slice.inUnits += pm.inUnits;
       slice.netUnits += pm.netUnits;
+      if (pm.inUnfiled) outUnfiled += pm.outLm || 0;
+      else outFiled += pm.outLm || 0;
     }
+    slice.inUnfiled = outUnfiled > 0 && outFiled === 0;
     return slice;
   });
   let running = item.inService;
@@ -652,14 +670,20 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
       inUnits: 0,
       netUnits: 0,
       projectedInService: 0,
+      inUnfiled: false,
     };
+    let outFiled = 0;
+    let outUnfiled = 0;
     for (const p of parts) {
       const pm = p.months[i] || {};
       slice.outUnits += pm.outUnits || 0;
       slice.inUnits += pm.inUnits || 0;
       slice.netUnits += pm.netUnits || 0;
       slice.projectedInService += pm.projectedInService || 0;
+      if (pm.inUnfiled) outUnfiled += pm.outUnits || 0;
+      else outFiled += pm.outUnits || 0;
     }
+    slice.inUnfiled = outUnfiled > 0 && outFiled === 0;
     return slice;
   });
   const peak = months.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), months[0] || { index: 1, outUnits: 0 });
@@ -768,7 +792,7 @@ function buildConversion(companies, months, peak) {
         hire.setDate(hire.getDate() + Math.round(lag));
         const key = monthKeyFromDate(hire);
         const slot = monthIx[key] != null ? byMonth[monthIx[key]] : null;
-        if (slot && slot.index >= 3) slot.projUnits += expected * unitPerHire;
+        if (slot && slot.index >= 4) slot.projUnits += expected * unitPerHire;
         else if (afterLast && hire >= afterLast && monthOffset(key) <= leadMonths) {
           beyondByKey[key] = (beyondByKey[key] || 0) + expected * unitPerHire;
         }
@@ -779,7 +803,7 @@ function buildConversion(companies, months, peak) {
   const peakOut = peak && peak.outUnits ? peak.outUnits : 0;
   const peakKey = peak && peak.date ? String(peak.date).slice(0, 7) : "";
   const peakPoUnits = (byMonth.find((m) => m.key === peakKey) || {}).poUnits || 0;
-  const buyMonths = byMonth.filter((m) => m.index >= 3);
+  const buyMonths = byMonth.filter((m) => m.index >= 4);
   const beyondMonths = Object.keys(beyondByKey).sort().map((k) => ({
     key: k,
     projUnits: beyondByKey[k],
@@ -811,6 +835,7 @@ function buildConversion(companies, months, peak) {
     firmPct,
     avgDays: dayW ? dayS / dayW : null,
     leadMonths: 4,
+    buyIndex: 4,
     confidence,
     months: byMonth,
     companies: withFirm,
@@ -1262,11 +1287,53 @@ function parseBranchStock(raw) {
   }
 }
 
+function findStocktakeCsv() {
+  const names = ["LocationItem.csv", "Stocktake.csv", "StockTake.csv", "StocktakeList.csv", "Stock Take.csv"];
+  const dirs = [];
+  try {
+    if (fs.existsSync(BRANCH_EXPORT_DIR)) {
+      for (const d of fs.readdirSync(BRANCH_EXPORT_DIR).sort().reverse().slice(0, 10)) {
+        dirs.push(path.join(BRANCH_EXPORT_DIR, d));
+      }
+    }
+  } catch {
+    /* share offline */
+  }
+  for (const dir of dirs) {
+    for (const n of names) {
+      const p = path.join(dir, n);
+      if (fs.existsSync(p)) return p;
+    }
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!/\.csv$/i.test(f)) continue;
+        const head = fs.readFileSync(path.join(dir, f), "utf8").slice(0, 500);
+        if (/laststocktake/i.test(head) || /cv_LastStocktakeDate/i.test(head)) return path.join(dir, f);
+      }
+    } catch {
+      /* skip unreadable dir */
+    }
+  }
+  return "";
+}
+
 function loadStocktakeImport() {
   try {
-    return JSON.parse(fs.readFileSync(STOCKTAKES_FILE, "utf8"));
+    const existing = JSON.parse(fs.readFileSync(STOCKTAKES_FILE, "utf8"));
+    if (existing && existing.rows && existing.rows.length) return existing;
   } catch {
-    return { importedAt: "", source: "", rows: [] };
+    /* none yet */
+  }
+  const found = findStocktakeCsv();
+  if (!found) return { importedAt: "", source: "", rows: [] };
+  try {
+    const rows = rowsFromCsv(fs.readFileSync(found, "utf8"));
+    if (!rows.length) return { importedAt: "", source: found, rows: [] };
+    const payload = { importedAt: new Date().toISOString(), source: found, rows };
+    saveStocktakeImport(payload);
+    return payload;
+  } catch {
+    return { importedAt: "", source: found, rows: [] };
   }
 }
 
