@@ -82,7 +82,7 @@ function loadCalculator(state, month) {
   const raw = fs.readFileSync(full, "utf8");
   const items = unwrapItems(JSON.parse(raw));
   const st = fs.statSync(full);
-  return { file, full, items, modified: st.mtime.toISOString() };
+  return { file, full, items, modified: st.mtime.toISOString(), state, month };
 }
 
 function suggestedInto(it, state) {
@@ -980,6 +980,145 @@ function buildDetails(state, month) {
   };
 }
 
+function buildNationalDetails(month) {
+  const byState = [];
+  const merged = new Map();
+  const filesUsed = [];
+  const submitted = new Set();
+  const orderLocks = [];
+  let modified = "";
+  let cacheDate = "";
+  for (const st of STATES) {
+    const calc = loadCalculatorNearest(st, month);
+    if (!calc) {
+      byState.push({
+        state: st,
+        missing: true,
+        file: "",
+        calcMonth: "",
+        exact: false,
+        orderLines: 0,
+        orderQty: 0,
+        orderCost: 0,
+        sysCost: 0,
+        decisionCost: 0,
+        shortfallLines: 0,
+      });
+      continue;
+    }
+    const calcMonth = calc.month || month;
+    const d = buildDetails(st, calcMonth);
+    filesUsed.push(d.file);
+    if (d.modified && d.modified > modified) modified = d.modified;
+    if (!cacheDate && d.cacheDate) cacheDate = d.cacheDate;
+    String(d.forecastSubmitted || "")
+      .split("+")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((s) => submitted.add(s));
+    if (d.orderSubmitted) orderLocks.push(`${st} ${d.orderSubmitted}`);
+    byState.push({
+      state: st,
+      missing: false,
+      file: d.file,
+      calcMonth,
+      exact: calcMonth === month,
+      cacheDate: d.cacheDate || "",
+      forecastSubmitted: d.forecastSubmitted || "",
+      orderSubmitted: d.orderSubmitted || "",
+      orderLines: d.totals.orderLines,
+      orderQty: d.totals.orderQty,
+      orderCost: d.totals.orderCost,
+      sysCost: d.totals.sysCost,
+      decisionCost: d.totals.decisionCost,
+      shortfallLines: d.totals.shortfallLines,
+    });
+    for (const r of d.rows) {
+      let row = merged.get(r.code);
+      if (!row) {
+        row = {
+          code: r.code,
+          name: r.name,
+          family: r.family,
+          landed: r.landed,
+          onHand: 0,
+          inService: 0,
+          totalStock: 0,
+          currentOrders: 0,
+          surplus: 0,
+          orderQty: 0,
+          orderCost: 0,
+          sysQty: 0,
+          sysCost: 0,
+          decisionCost: 0,
+          byState: {},
+        };
+        merged.set(r.code, row);
+      }
+      row.onHand += r.onHand || 0;
+      row.inService += r.inService || 0;
+      row.totalStock += r.totalStock || 0;
+      row.currentOrders += r.currentOrders || 0;
+      row.surplus += r.surplus || 0;
+      row.orderQty += r.orderQty || 0;
+      row.orderCost += r.orderCost || 0;
+      row.sysQty += r.sysQty || 0;
+      row.sysCost += r.sysCost || 0;
+      row.decisionCost += r.decisionCost || 0;
+      row.byState[st] = {
+        orderQty: r.orderQty || 0,
+        orderCost: r.orderCost || 0,
+        sysCost: r.sysCost || 0,
+        surplus: r.surplus || 0,
+      };
+    }
+  }
+  const rows = [...merged.values()].sort((a, b) => a.code.localeCompare(b.code));
+  const monthByState = Object.fromEntries(byState.map((s) => [s.state, s.calcMonth]));
+  for (const r of rows) {
+    const ranked = STATES.filter((s) => (r.byState[s] || {}).orderQty > 0).sort(
+      (a, b) => (r.byState[b].orderQty || 0) - (r.byState[a].orderQty || 0)
+    );
+    r.topState = ranked[0] || STATES.find((s) => monthByState[s]) || "QLD";
+    r.topMonth = monthByState[r.topState] || month;
+  }
+  const orderRows = rows.filter((r) => r.orderQty > 0);
+  const families = {};
+  for (const r of rows) {
+    const fam = r.family || "(blank)";
+    if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
+    families[fam].n += 1;
+    if (r.orderQty > 0) {
+      families[fam].orderLines += 1;
+      families[fam].orderCost += r.orderCost;
+      families[fam].sysCost += r.sysCost;
+    }
+    families[fam].decisionCost += r.decisionCost;
+  }
+  return {
+    state: "NAT",
+    month,
+    national: true,
+    file: filesUsed.join(" · ") || "—",
+    modified,
+    cacheDate,
+    forecastSubmitted: [...submitted].join("+"),
+    orderSubmitted: orderLocks.join(" · "),
+    byState,
+    totals: {
+      items: rows.length,
+      orderLines: orderRows.length,
+      orderQty: orderRows.reduce((s, r) => s + r.orderQty, 0),
+      orderCost: orderRows.reduce((s, r) => s + r.orderCost, 0),
+      sysCost: rows.reduce((s, r) => s + r.sysCost, 0),
+      decisionCost: rows.reduce((s, r) => s + r.decisionCost, 0),
+      shortfallLines: rows.filter((r) => r.surplus < 0).length,
+    },
+    families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
+    rows,
+  };
+}
+
 const STOCKTAKES_FILE = path.join(DATA_DIR, "stocktakes.json");
 const FM_FILE = path.join(DATA_DIR, "fm.json");
 const BRANCH_EXPORT_DIR = "\\\\fs\\apps\\FilemakerCSVExport\\ERP\\BSQ";
@@ -1466,7 +1605,15 @@ app.get("/api/details", (req, res) => {
   try {
     const state = String(req.query.state || "QLD").toUpperCase();
     const month = String(req.query.month || "");
-    if (!STATES.includes(state) || !/^\d{4}-\d{2}$/.test(month)) {
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      res.status(400).json({ error: "month=YYYY-MM required" });
+      return;
+    }
+    if (state === "NAT" || state === "NATIONAL") {
+      res.json(buildNationalDetails(month));
+      return;
+    }
+    if (!STATES.includes(state)) {
       res.status(400).json({ error: "state and month=YYYY-MM required" });
       return;
     }
@@ -1497,6 +1644,43 @@ app.get("/api/export.xlsx", async (req, res) => {
   try {
     const state = String(req.query.state || "QLD").toUpperCase();
     const month = String(req.query.month || "");
+    if (state === "NAT" || state === "NATIONAL") {
+      const data = buildNationalDetails(month);
+      const wb = new ExcelJS.Workbook();
+      const by = wb.addWorksheet("BY STATE");
+      by.addRow(["System order from each state’s StockCalculator — not a GM Forecast Order."]);
+      by.addRow(["State", "Calculator", "Month", "Exact month", "Order lines", "Order qty", "System order", "System requested"]);
+      for (const s of data.byState) {
+        by.addRow([s.state, s.file || "—", s.calcMonth || "—", s.exact ? "Yes" : "Prior file", s.orderLines, s.orderQty, s.orderCost, s.sysCost]);
+      }
+      by.addRow(["National", "", data.month, "", data.totals.orderLines, data.totals.orderQty, data.totals.orderCost, data.totals.sysCost]);
+      const totals = wb.addWorksheet("TOTALS");
+      totals.addRow(["National system order"]);
+      totals.addRow(["Family", "Order lines", "System order", "System requested"]);
+      for (const f of data.families) {
+        totals.addRow([f.family, f.orderLines, f.orderCost, f.sysCost]);
+      }
+      totals.addRow(["Grand Total", data.totals.orderLines, data.totals.orderCost, data.totals.sysCost]);
+      const ws = wb.addWorksheet("DETAILS");
+      ws.addRow(["ITEM CODE", "DESCRIPTION", "FAMILY", "Total Stock", ...STATES.map((s) => `${s} Order $`), "Order Qty", "System order", "System requested"]);
+      for (const r of data.rows) {
+        ws.addRow([
+          r.code,
+          r.name,
+          r.family,
+          r.totalStock,
+          ...STATES.map((s) => (r.byState[s] && r.byState[s].orderCost) || null),
+          r.orderQty || null,
+          r.orderCost || null,
+          r.sysCost || null,
+        ]);
+      }
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="NAT-${month}-Stock-Review.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+      return;
+    }
     const data = buildDetails(state, month);
     const others = STATES.filter((s) => s !== state);
     const wb = new ExcelJS.Workbook();
@@ -1562,7 +1746,7 @@ app.get("/api/export.xlsx", async (req, res) => {
       c.width = i === 1 ? 36 : i === 3 ? 28 : 14;
     });
     const totals = wb.addWorksheet("TOTALS");
-    totals.addRow(["Original Ask"]);
+    totals.addRow(["System Order"]);
     totals.addRow(["Family", `Sum of ${state} Order Cost`, `Sum of ${state} System Requested Cost`]);
     for (const f of data.families) {
       totals.addRow([f.family, f.orderCost, f.sysCost]);
