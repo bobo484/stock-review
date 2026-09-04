@@ -2,6 +2,7 @@
 
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const express = require("express");
 const ExcelJS = require("exceljs");
 const { loadCompanyPos, attachPos } = require("./erp-pos");
@@ -1332,6 +1333,9 @@ app.get("/api/export.xlsx", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Stock Review  http://localhost:${PORT}`);
+  const host = os.hostname();
+  console.log(`Stock Review is running. Leave this window open.`);
+  console.log(`  This screen:  http://localhost:${PORT}/?state=QLD&month=2026-09&code=SS-DS24`);
+  console.log(`  This PC:      http://${host}:${PORT}/?state=QLD&month=2026-09&code=SS-DS24`);
   console.log(`StockCalculator  ${STOCK_DIR}  reachable=${fs.existsSync(STOCK_DIR)}`);
 });

@@ -73,6 +73,14 @@
   .chart .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;color:var(--muted);font-size:11px}
   .chart .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
   .demand-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+  [data-tip]{cursor:help}
+  #hover-tip{
+    position:fixed;z-index:9999;max-width:340px;pointer-events:none;
+    background:#141c24;border:1px solid var(--accent);border-radius:8px;
+    padding:8px 11px;box-shadow:0 10px 28px rgba(0,0,0,.5);
+    color:var(--text);font-size:12px;line-height:1.4;display:none
+  }
+  #hover-tip .tip-title{color:var(--accent);font-weight:650;font-size:11px;text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px}
 </style>
 </head>
 <body>
@@ -84,16 +92,16 @@
   <div class="row">
     <div class="seg" id="states"></div>
     <select id="month"></select>
-    <button class="btn" id="onlyOrders">Order lines only</button>
+    <button class="btn" id="onlyOrders" data-tip-title="Order lines only" data-tip="Show only SKUs FileMaker wants you to buy. Turn off to see the whole fleet.">Order lines only</button>
     <input type="search" id="q" placeholder="Search code or name" />
-    <a class="btn primary" id="export" href="#">Export Excel</a>
+    <a class="btn primary" id="export" href="#" data-tip-title="Export Excel" data-tip="Download this state’s Details grid as an Excel file, including Decision values.">Export Excel</a>
   </div>
 </header>
 <div class="wrap">
   <div class="tabs" id="tabs">
-    <button class="on" data-view="details">Details</button>
-    <button data-view="demand" id="tabDemand" disabled>Demand</button>
-    <button data-view="stocktakes">Stocktakes</button>
+    <button class="on" data-view="details" data-tip-title="Details" data-tip="National ask grid — stock, surplus, proposed buy, and GM Decision.">Details</button>
+    <button data-view="demand" id="tabDemand" disabled data-tip-title="Demand" data-tip="Why this item is on the ask: forecast starts, customer POs, and hire duration. Click a row first.">Demand</button>
+    <button data-view="stocktakes" data-tip-title="Stocktakes" data-tip="Last FileMaker stocktake date versus the forecast cache date.">Stocktakes</button>
   </div>
   <div class="banner" id="banner">Loading StockCalculator…</div>
   <div id="view-details">
@@ -105,6 +113,7 @@
   <div id="view-demand" hidden></div>
   <div id="view-stocktakes" hidden></div>
 </div>
+<div id="hover-tip"></div>
 <script>
 const STATES = ["QLD","NSW","VIC","SA"];
 let files = [];
@@ -129,20 +138,176 @@ const num = (n) => (n||0).toLocaleString("en-AU");
 const pct = (n) => n ? (n*100).toFixed(0)+"%" : "—";
 const cls = (n) => n < 0 ? "neg" : n > 0 ? "pos" : "";
 
+const TIPS = {
+  originalAsk: "FileMaker proposed buy for this state and month — order qty × landed cost. This is the calculator ask, not a GM decision.",
+  orderLines: "How many SKUs FileMaker wants you to buy (order qty greater than zero).",
+  orderQtySum: "Total units FileMaker proposes buying on the current ask.",
+  shortfallSkus: "Items where stock + current orders is below what target utilisation needs.",
+  systemRequested: "System qty × landed cost. FileMaker’s system-requested quantity, usually close to the original ask.",
+  decisionSoFar: "Dollar value of quantities typed in the Decision column. $0 means no GM buy has been entered yet.",
+  familyChip: "Filter the grid to this family. The number is order lines; the $ is the original FileMaker ask.",
+  item: "Inventory code. Full name on the grey line. Click the row (not Decision) to open Demand.",
+  family: "Product family this item belongs to.",
+  landed: "Landed cost per unit — what one more unit costs to buy.",
+  onHand: "Units in the yard / depot, not currently on hire.",
+  inService: "Units currently out on hire.",
+  totalStock: "On hand + in service. The fleet you have today.",
+  util: "In service ÷ total stock. How much of the fleet is out.",
+  target: "FileMaker target utilisation. Required fleet = forecast peak in-service ÷ this target.",
+  currentOrders: "Units already on order from suppliers, not yet in the fleet.",
+  surplus: "Stock + current orders − required. Negative is a shortfall and drives the proposed buy.",
+  orderQty: "FileMaker proposed buy for this state: enough units to cover the shortfall.",
+  otherSug: "That other state’s FileMaker proposed order for the same item — so you can see if they are already buying it.",
+  decision: "Type the qty you actually want to buy. This is the GM override of the calculator ask.",
+  decisionCost: "Decision qty × landed cost.",
+  systemQty: "FileMaker system-requested quantity for this state.",
+  systemCost: "System qty × landed cost.",
+  propSurplus: "Surplus after the proposed buy. Should move toward zero if you take the ask.",
+  propUtil: "Utilisation after the proposed buy and expected demand.",
+  orderCost: "Order qty × landed cost — the original ask for this line.",
+  forecastMax: "FileMaker Forecast Max: peak in-service this item is expected to hit (already on hire + net starts), not the sum of monthly OUT.",
+  required: "Fleet needed at target utilisation: ceil(forecast max ÷ target). This is the stock level the ask is trying to reach.",
+  cover: "Total stock today + current supplier orders. What you already have or have bought.",
+  shortfall: "Required − cover. Positive means you are short; that is the proposed buy.",
+  proposedBuy: "Units FileMaker wants you to buy to close the shortfall.",
+  nowInService: "Units of this item on hire right now.",
+  poCover: "Waiting customer POs timed to the peak month, as a % of that month’s forecast OUT starts. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
+  firmWaiting: "All waiting customer POs converted to this item’s units (waiting × avg LM/hire × qty/m). The whole pipeline, not one month.",
+  peakOut: "Forecast units going to new sites in the peak month (LM × qty/m).",
+  conversionDays: "Average days from customer PO date raised to on hire, weighted by firm units. Used to time waiting POs onto the graph.",
+  weightedDays: "Customer-weighted hire duration on this item now (large clients move the number more).",
+  priorWeighted: "Same weighted hire duration in the previous Sales Forecast month.",
+  daysChange: "Change in weighted hire days versus last forecast. Longer means stock stays out and less comes back to install again.",
+  extraHeld: "Extra units held (or released) because duration changed: peak starts × change in days ÷ working days.",
+  outStarts: "Forecast site starts that month, in this item’s units (LM × qty/m).",
+  inReturning: "Forecast units coming off hire that month.",
+  netHeld: "OUT − IN. Extra stock the fleet must hold that month. Negative (purple) means more is returning than starting.",
+  netReleased: "IN greater than OUT — stock coming back, not extra held.",
+  projectedIS: "Projected in-service if the monthly OUT/IN path is followed.",
+  poBacked: "Waiting customer POs converted to this item’s units and timed to expected hire month (date raised + that builder’s avg days).",
+  requiredLine: "Dashed line: fleet required at target utilisation.",
+  coverLine: "Dashed line: total stock + current orders you already have.",
+  workingDays: "Working days in that forecast month.",
+  hires: "Number of forecast hire contracts starting that month.",
+  outLm: "Forecast lineal metres going out.",
+  netLm: "OUT LM − IN LM.",
+  qtyM: "How many of this item are used per lineal metre on that hire product.",
+  priorRate: "Qty per metre on last month’s calculator.",
+  rateChange: "Change in qty/m versus last month. Up means more of this item per job.",
+  daysNow: "Customer-weighted hire days on this product in the current forecast.",
+  daysWas: "Same measure in the prior Sales Forecast.",
+  deltaDays: "Change in hire days. Red / longer increases the ask.",
+  peakOutUnits: "This item’s units on that product in the peak month.",
+  peakHires: "Hire contracts on that product in the peak month.",
+  latestPo: "Most recent real customer PO on this builder (placeholders like AWAITING are skipped).",
+  poCount: "Customer contracts with a real PO in the last 12 months on this item’s hire products.",
+  contracts: "All live contracts for this builder on this item’s hire products (last 12 months).",
+  waiting: "POs raised but not yet on hire — contracted starts still in the pipeline.",
+  firmUnits: "Waiting POs × this builder’s avg LM/hire × this item’s qty/m.",
+  avgDaysHire: "This builder’s average days from PO raised to on hire.",
+  avgLm: "Average lineal metres per hire for this builder on the peak month.",
+  thisItemUnits: "This builder’s peak-month OUT for this item (LM × qty/m).",
+  extraHeldRow: "Extra units of this item held because this customer × product lengthened (or released if shortened).",
+  staleNever: "Items with no stocktake in the flag window, or never counted, as at the forecast cache date.",
+  neverCounted: "Items with no LastStocktake date in FileMaker.",
+  onAskStale: "Items that are on this month’s buy ask and also stale or never counted.",
+  countedWindow: "Items counted inside the flag window before the forecast cache date.",
+  allItems: "Every SKU in this state’s StockCalculator file.",
+  withDate: "Items that have at least one LastStocktake date.",
+  lastStocktake: "Newest FileMaker LocationItem last-stocktake date for this item.",
+  oldestBranch: "Oldest branch last-stocktake date — the weakest count.",
+  daysBefore: "Days between the last stocktake and the forecast cache date. Larger = staler at forecast time.",
+  stockStatus: "Whether the count was fresh, stale, never done, or after the forecast.",
+  onAsk: "Proposed buy qty if this item is on the ask.",
+  onlyOrders: "Show only SKUs FileMaker wants you to buy. Turn off to see the whole fleet.",
+  detailsTab: "National ask grid — stock, surplus, proposed buy, and GM Decision.",
+  demandTab: "Why this item is on the ask: forecast starts, POs, hire duration.",
+  stocktakesTab: "Last FileMaker stocktake date versus the forecast cache date.",
+};
+
+function tipAttr(text, title) {
+  if (!text) return "";
+  return ` data-tip="${esc(text)}"${title ? ` data-tip-title="${esc(title)}"` : ""}`;
+}
+function kpiCard(label, val, klass, def, cardClass) {
+  return `<div class="card ${cardClass || ""}"${tipAttr(def, label)}><div class="label">${esc(label)}</div><div class="val ${klass || ""}">${val}</div></div>`;
+}
+function thTip(label, def, left) {
+  return `<th class="${left ? "l" : ""}"${tipAttr(def, label)}>${esc(label)}</th>`;
+}
+function tdTip(html, def, extra, left) {
+  return `<td class="${[left ? "l" : "", extra || ""].filter(Boolean).join(" ")}"${tipAttr(def)}>${html}</td>`;
+}
+
+(function bindHoverTips() {
+  const box = document.getElementById("hover-tip");
+  const place = (e) => {
+    const pad = 14;
+    const w = box.offsetWidth;
+    const h = box.offsetHeight;
+    let x = e.clientX + pad;
+    let y = e.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+    box.style.left = Math.max(8, x) + "px";
+    box.style.top = Math.max(8, y) + "px";
+  };
+  document.addEventListener("pointerover", (e) => {
+    const el = e.target.closest("[data-tip]");
+    if (!el) {
+      box.style.display = "none";
+      return;
+    }
+    const title = el.getAttribute("data-tip-title");
+    const body = el.getAttribute("data-tip") || "";
+    box.innerHTML = (title ? `<div class="tip-title">${esc(title)}</div>` : "") + esc(body);
+    box.style.display = "block";
+    place(e);
+  });
+  document.addEventListener("pointermove", (e) => {
+    if (box.style.display === "block") place(e);
+  });
+  document.addEventListener("pointerout", (e) => {
+    if (e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("[data-tip]")) return;
+    if (e.target.closest && e.target.closest("[data-tip]") && e.relatedTarget && e.target.closest("[data-tip]").contains(e.relatedTarget)) return;
+    box.style.display = "none";
+  });
+})();
+
+function pageParams() {
+  return new URLSearchParams(location.search);
+}
+
+function syncUrl(code) {
+  const u = new URL(location.href);
+  u.searchParams.set("state", state);
+  u.searchParams.set("month", month);
+  if (code) u.searchParams.set("code", code);
+  else u.searchParams.delete("code");
+  history.replaceState(null, "", u.pathname + u.search);
+}
+
 async function boot() {
+  const params = pageParams();
+  const startState = params.get("state");
+  const startMonth = params.get("month");
+  const startCode = params.get("code") || "";
   const r = await fetch("/api/files");
   const j = await r.json();
   files = j.files || [];
   const qld = files.filter(f => f.state === "QLD");
-  if (qld.length) month = qld[0].month;
+  if (startState && STATES.includes(startState)) state = startState;
+  if (startMonth) month = startMonth;
+  else if (qld.length) month = qld[0].month;
   else if (files[0]) { state = files[0].state; month = files[0].month; }
   renderControls();
   await load();
+  if (startCode) await openDemand(startCode);
 }
 
 function renderControls() {
   $("states").innerHTML = STATES.map(s =>
-    `<button data-s="${s}" class="${s===state?"on":""}">${s}</button>`
+    `<button data-s="${s}" class="${s===state?"on":""}"${tipAttr("Show Forecast Orders for " + s + ".", s)}>${s}</button>`
   ).join("");
   $("states").onclick = (e) => {
     const s = e.target.dataset.s;
@@ -234,12 +399,12 @@ function drawStocktakes() {
       <p class="muted">Dates come from FileMaker LocationItem (LastStocktake). They are not in the StockCalculator JSON. Import a Stocktake List export, or connect Inventory via data/fm.json.</p>
     </div>
     <div class="cards">
-      <div class="card warn"><div class="label">Stale / never</div><div class="val neg">${num(t.stale)}</div></div>
-      <div class="card"><div class="label">Never counted</div><div class="val ${t.never?"neg":""}">${num(t.never)}</div></div>
-      <div class="card"><div class="label">On the ask + stale</div><div class="val ${t.onAskStale?"neg":""}">${num(t.onAskStale)}</div></div>
-      <div class="card good"><div class="label">Counted in window</div><div class="val pos">${num(t.fresh)}</div></div>
-      <div class="card"><div class="label">All items</div><div class="val">${num(t.items)}</div></div>
-      <div class="card"><div class="label">With a date</div><div class="val">${num(t.withDate)}</div></div>
+      ${kpiCard("Stale / never", num(t.stale), "neg", TIPS.staleNever, "warn")}
+      ${kpiCard("Never counted", num(t.never), t.never?"neg":"", TIPS.neverCounted)}
+      ${kpiCard("On the ask + stale", num(t.onAskStale), t.onAskStale?"neg":"", TIPS.onAskStale)}
+      ${kpiCard("Counted in window", num(t.fresh), "pos", TIPS.countedWindow, "good")}
+      ${kpiCard("All items", num(t.items), "", TIPS.allItems)}
+      ${kpiCard("With a date", num(t.withDate), "", TIPS.withDate)}
     </div>
     <div class="row" style="margin:8px 0 12px">
       <label class="muted">Flag if older than</label>
@@ -260,22 +425,22 @@ function drawStocktakes() {
     <div class="table-wrap stocktakes" style="max-height:calc(100vh - 380px)">
       <table>
         <thead><tr>
-          <th class="l">Item</th><th class="l">Family</th>
-          <th>Last stocktake</th><th>Oldest branch</th>
-          <th>Days before forecast</th><th class="l">Status</th>
-          <th>On ask</th><th>Total stock</th><th>On hand</th>
+          ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}
+          ${thTip("Last stocktake", TIPS.lastStocktake)}${thTip("Oldest branch", TIPS.oldestBranch)}
+          ${thTip("Days before forecast", TIPS.daysBefore)}${thTip("Status", TIPS.stockStatus, true)}
+          ${thTip("On ask", TIPS.onAsk)}${thTip("Total stock", TIPS.totalStock)}${thTip("On hand", TIPS.onHand)}
         </tr></thead>
         <tbody>${rows.map(r => `
           <tr class="clickable ${r.status==="stale"||r.status==="never"?"order":""}" data-code="${esc(r.code)}">
-            <td class="l"><b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name,15))}</div></td>
-            <td class="l">${esc(r.family)}</td>
-            <td>${r.lastStocktake || "—"}</td>
-            <td>${r.oldestStocktake || "—"}</td>
-            <td class="${tone(r.status)}">${r.daysBeforeForecast==null?"—":num(r.daysBeforeForecast)}</td>
-            <td class="l ${tone(r.status)}">${esc(stockStatusLabel(r.status))}</td>
-            <td>${r.orderQty?num(r.orderQty):""}</td>
-            <td><b>${num(r.totalStock)}</b></td>
-            <td>${num(r.onHand)}</td>
+            ${tdTip(`<b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name,15))}</div>`, TIPS.item, "", true)}
+            ${tdTip(esc(r.family), TIPS.family, "", true)}
+            ${tdTip(r.lastStocktake || "—", TIPS.lastStocktake)}
+            ${tdTip(r.oldestStocktake || "—", TIPS.oldestBranch)}
+            ${tdTip(r.daysBeforeForecast==null?"—":num(r.daysBeforeForecast), TIPS.daysBefore, tone(r.status))}
+            ${tdTip(esc(stockStatusLabel(r.status)), TIPS.stockStatus, tone(r.status), true)}
+            ${tdTip(r.orderQty?num(r.orderQty):"", TIPS.onAsk)}
+            ${tdTip(`<b>${num(r.totalStock)}</b>`, TIPS.totalStock)}
+            ${tdTip(num(r.onHand), TIPS.onHand)}
           </tr>`).join("")}</tbody>
       </table>
     </div>`;
@@ -336,16 +501,17 @@ function draw() {
   const locked = data.orderSubmitted ? `Forecast Orders locked: ${data.orderSubmitted}` : "Forecast Orders not locked";
   $("banner").textContent =
     `${data.file} · cache ${data.cacheDate || "—"} · submitted ${data.forecastSubmitted || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}`;
-  $("kpis").innerHTML = `
-    <div class="card"><div class="label">Original ask</div><div class="val">${aud(t.orderCost)}</div></div>
-    <div class="card"><div class="label">Order lines</div><div class="val">${num(t.orderLines)}</div></div>
-    <div class="card"><div class="label">Order qty</div><div class="val">${num(t.orderQty)}</div></div>
-    <div class="card"><div class="label">Shortfall SKUs</div><div class="val red">${num(t.shortfallLines)}</div></div>
-    <div class="card"><div class="label">System requested</div><div class="val">${aud(t.sysCost)}</div></div>
-    <div class="card"><div class="label">Decision so far</div><div class="val">${aud(t.decisionCost)}</div></div>`;
+  $("kpis").innerHTML = [
+    kpiCard("Original ask", aud(t.orderCost), "", TIPS.originalAsk),
+    kpiCard("Order lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard("Order qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard("Shortfall SKUs", num(t.shortfallLines), "red", TIPS.shortfallSkus),
+    kpiCard("System requested", aud(t.sysCost), "", TIPS.systemRequested),
+    kpiCard("Decision so far", aud(t.decisionCost), "", TIPS.decisionSoFar),
+  ].join("");
   const fams = [{family:"ALL", orderLines:t.orderLines, orderCost:t.orderCost}, ...data.families.filter(f => f.orderLines)];
   $("families").innerHTML = fams.map(f =>
-    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}">${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.orderCost)}</button>`
+    `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.orderCost)}</button>`
   ).join("");
   $("families").onclick = (e) => {
     const f = e.target.dataset.f;
@@ -357,38 +523,38 @@ function draw() {
   const rows = visibleRows();
   $("grid").innerHTML = `<table>
     <thead><tr>
-      <th class="l">Item</th><th class="l">Family</th><th>Landed</th>
-      <th>On Hand</th><th>In Service</th><th>Total Stock</th>
-      <th>Util</th><th>Target</th><th>Current Orders</th>
-      <th>Surplus</th><th>Order Qty</th>
-      <th>${others[0]} sug.</th><th>${others[1]} sug.</th><th>${others[2]} sug.</th>
-      <th>Decision</th><th>Decision $</th>
-      <th>System qty</th><th>System $</th>
-      <th>Prop. surplus</th><th>Prop. util</th><th>Order $</th>
+      ${thTip("Item", TIPS.item, true)}${thTip("Family", TIPS.family, true)}${thTip("Landed", TIPS.landed)}
+      ${thTip("On Hand", TIPS.onHand)}${thTip("In Service", TIPS.inService)}${thTip("Total Stock", TIPS.totalStock)}
+      ${thTip("Util", TIPS.util)}${thTip("Target", TIPS.target)}${thTip("Current Orders", TIPS.currentOrders)}
+      ${thTip("Surplus", TIPS.surplus)}${thTip("Order Qty", TIPS.orderQty)}
+      ${thTip(others[0] + " sug.", TIPS.otherSug)}${thTip(others[1] + " sug.", TIPS.otherSug)}${thTip(others[2] + " sug.", TIPS.otherSug)}
+      ${thTip("Decision", TIPS.decision)}${thTip("Decision $", TIPS.decisionCost)}
+      ${thTip("System qty", TIPS.systemQty)}${thTip("System $", TIPS.systemCost)}
+      ${thTip("Prop. surplus", TIPS.propSurplus)}${thTip("Prop. util", TIPS.propUtil)}${thTip("Order $", TIPS.orderCost)}
     </tr></thead>
     <tbody>${rows.map(r => `
       <tr class="clickable ${r.orderQty>0?"order":""}" data-code="${esc(r.code)}">
-        <td class="l"><b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div></td>
-        <td class="l">${esc(r.family)}</td>
-        <td>${aud(r.landed)}</td>
-        <td>${num(r.onHand)}</td>
-        <td>${num(r.inService)}</td>
-        <td><b>${num(r.totalStock)}</b></td>
-        <td>${pct(r.util)}</td>
-        <td>${pct(r.targetUtil)}</td>
-        <td>${num(r.currentOrders)}</td>
-        <td class="${cls(r.surplus)}">${num(r.surplus)}</td>
-        <td>${r.orderQty?num(r.orderQty):""}</td>
-        <td>${r.suggested[others[0]]?num(r.suggested[others[0]]):""}</td>
-        <td>${r.suggested[others[1]]?num(r.suggested[others[1]]):""}</td>
-        <td>${r.suggested[others[2]]?num(r.suggested[others[2]]):""}</td>
-        <td><input class="dec" data-code="${esc(r.code)}" value="${r.decision==null?"":r.decision}" /></td>
-        <td>${r.decision==null?"":aud(r.decisionCost)}</td>
-        <td>${num(r.sysQty)}</td>
-        <td>${aud(r.sysCost)}</td>
-        <td class="${cls(r.proposedSurplus)}">${num(r.proposedSurplus)}</td>
-        <td>${pct(r.proposedUtil)}</td>
-        <td>${r.orderQty?aud(r.orderCost):""}</td>
+        ${tdTip(`<b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div>`, TIPS.item, "", true)}
+        ${tdTip(esc(r.family), TIPS.family, "", true)}
+        ${tdTip(aud(r.landed), TIPS.landed)}
+        ${tdTip(num(r.onHand), TIPS.onHand)}
+        ${tdTip(num(r.inService), TIPS.inService)}
+        ${tdTip(`<b>${num(r.totalStock)}</b>`, TIPS.totalStock)}
+        ${tdTip(pct(r.util), TIPS.util)}
+        ${tdTip(pct(r.targetUtil), TIPS.target)}
+        ${tdTip(num(r.currentOrders), TIPS.currentOrders)}
+        ${tdTip(num(r.surplus), TIPS.surplus, cls(r.surplus))}
+        ${tdTip(r.orderQty?num(r.orderQty):"", TIPS.orderQty)}
+        ${tdTip(r.suggested[others[0]]?num(r.suggested[others[0]]):"", TIPS.otherSug)}
+        ${tdTip(r.suggested[others[1]]?num(r.suggested[others[1]]):"", TIPS.otherSug)}
+        ${tdTip(r.suggested[others[2]]?num(r.suggested[others[2]]):"", TIPS.otherSug)}
+        ${tdTip(`<input class="dec" data-code="${esc(r.code)}" value="${r.decision==null?"":r.decision}" />`, TIPS.decision)}
+        ${tdTip(r.decision==null?"":aud(r.decisionCost), TIPS.decisionCost)}
+        ${tdTip(num(r.sysQty), TIPS.systemQty)}
+        ${tdTip(aud(r.sysCost), TIPS.systemCost)}
+        ${tdTip(num(r.proposedSurplus), TIPS.propSurplus, cls(r.proposedSurplus))}
+        ${tdTip(pct(r.proposedUtil), TIPS.propUtil)}
+        ${tdTip(r.orderQty?aud(r.orderCost):"", TIPS.orderCost)}
       </tr>`).join("")}</tbody>
   </table>`;
   $("grid").querySelectorAll("input.dec").forEach(inp => {
@@ -399,11 +565,23 @@ function draw() {
     tr.addEventListener("click", () => openDemand(tr.dataset.code));
   });
   $("totals").innerHTML = `<table>
-    <thead><tr><th class="l">Family</th><th>Order lines</th><th>Original ask</th><th>System requested</th><th>Decision</th></tr></thead>
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Order lines", TIPS.orderLines)}${thTip("Original ask", TIPS.originalAsk)}${thTip("System requested", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
     <tbody>${data.families.filter(f => f.orderLines || f.decisionCost).map(f => `
-      <tr><td class="l">${esc(f.family)}</td><td>${num(f.orderLines)}</td><td>${aud(f.orderCost)}</td><td>${aud(f.sysCost)}</td><td>${aud(f.decisionCost)}</td></tr>
+      <tr>
+        ${tdTip(esc(f.family), TIPS.family, "", true)}
+        ${tdTip(num(f.orderLines), TIPS.orderLines)}
+        ${tdTip(aud(f.orderCost), TIPS.originalAsk)}
+        ${tdTip(aud(f.sysCost), TIPS.systemRequested)}
+        ${tdTip(aud(f.decisionCost), TIPS.decisionSoFar)}
+      </tr>
     `).join("")}
-    <tr><td class="l"><b>Grand total</b></td><td><b>${num(t.orderLines)}</b></td><td><b>${aud(t.orderCost)}</b></td><td><b>${aud(t.sysCost)}</b></td><td><b>${aud(t.decisionCost)}</b></td></tr>
+    <tr>
+      ${tdTip("<b>Grand total</b>", TIPS.family, "", true)}
+      ${tdTip(`<b>${num(t.orderLines)}</b>`, TIPS.orderLines)}
+      ${tdTip(`<b>${aud(t.orderCost)}</b>`, TIPS.originalAsk)}
+      ${tdTip(`<b>${aud(t.sysCost)}</b>`, TIPS.systemRequested)}
+      ${tdTip(`<b>${aud(t.decisionCost)}</b>`, TIPS.decisionSoFar)}
+    </tr>
     </tbody></table>`;
 }
 
@@ -454,6 +632,7 @@ async function openDemand(code) {
     if (!r.ok) throw new Error(j.error || r.statusText);
     demand = j;
     demandScope = "item";
+    syncUrl(code);
     drawDemand();
   } catch (e) {
     $("view-demand").innerHTML = `<div class="err">${esc(e.message)}</div>`;
@@ -489,27 +668,29 @@ function durationBlock(d) {
   }
   const moverRows = (rows) => rows && rows.length
     ? rows.map((m) => `<tr>
-        <td class="l">${esc(m.company)}</td>
-        <td class="l muted">${esc(m.product)}</td>
-        <td>${daysf(m.priorDays)}</td>
-        <td>${daysf(m.days)}</td>
-        <td class="${m.delta>0?"neg":"pos"}">${signed(m.delta, 0)}</td>
-        <td>${num(Math.round(m.units))}</td>
-        <td class="${m.extraUnits>0?"neg":"pos"}">${signed(m.extraUnits, 0)}</td>
+        ${tdTip(esc(m.company), "Builder whose hire duration moved.", "", true)}
+        ${tdTip(esc(m.product), "Hire product this duration is measured on.", "muted", true)}
+        ${tdTip(daysf(m.priorDays), TIPS.daysWas)}
+        ${tdTip(daysf(m.days), TIPS.daysNow)}
+        ${tdTip(signed(m.delta, 0), TIPS.deltaDays, m.delta>0?"neg":"pos")}
+        ${tdTip(num(Math.round(m.units)), TIPS.thisItemUnits)}
+        ${tdTip(signed(m.extraUnits, 0), TIPS.extraHeldRow, m.extraUnits>0?"neg":"pos")}
       </tr>`).join("")
     : `<tr><td class="l muted" colspan="7">None over 1 day</td></tr>`;
   const moverHead = `<thead><tr>
-    <th class="l">Customer</th><th class="l">Product</th><th>Was</th><th>Now</th>
-    <th>Δ days</th><th>Peak units</th><th>Extra held</th>
+    ${thTip("Customer", "Builder whose hire duration moved.", true)}
+    ${thTip("Product", "Hire product this duration is measured on.", true)}
+    ${thTip("Was", TIPS.daysWas)}${thTip("Now", TIPS.daysNow)}
+    ${thTip("Δ days", TIPS.deltaDays)}${thTip("Peak units", TIPS.thisItemUnits)}${thTip("Extra held", TIPS.extraHeldRow)}
   </tr></thead>`;
   return `
     <h2>Hire duration — stock staying out</h2>
     <p class="muted">Weighted by each customer’s peak-month units of this item (LM × qty/m), so large clients move the signal. Compared on the same customer × product set as ${esc(priorLabel)}. Extra held = this month’s starts × change in days ÷ working days (${dur.workingDays || "—"}) — stock that does not come back to install again.</p>
     <div class="cards">
-      <div class="card ${tone}"><div class="label">Weighted days now</div><div class="val">${daysf(dur.compared != null ? dur.compared : dur.current)}</div></div>
-      <div class="card"><div class="label">${esc(priorLabel)} weighted</div><div class="val">${daysf(dur.prior)}</div></div>
-      <div class="card ${tone}"><div class="label">Change</div><div class="val ${dur.delta>0?"neg":dur.delta<0?"pos":""}">${signed(dur.delta, 1)}d</div></div>
-      <div class="card ${tone}"><div class="label">${dir === "shorter" ? "Units released" : "Extra units held"}</div><div class="val ${extra>0?"neg":extra<0?"pos":""}">${extra ? signed(extra, 0) : "—"}</div></div>
+      ${kpiCard("Weighted days now", daysf(dur.compared != null ? dur.compared : dur.current), "", TIPS.weightedDays, tone)}
+      ${kpiCard(priorLabel + " weighted", daysf(dur.prior), "", TIPS.priorWeighted)}
+      ${kpiCard("Change", signed(dur.delta, 1) + "d", dur.delta>0?"neg":dur.delta<0?"pos":"", TIPS.daysChange, tone)}
+      ${kpiCard(dir === "shorter" ? "Units released" : "Extra units held", extra ? signed(extra, 0) : "—", extra>0?"neg":extra<0?"pos":"", TIPS.extraHeld, tone)}
     </div>
     <div class="why ${tone === "warn" ? "card warn" : tone === "good" ? "card good" : ""}">
       <p>${impact}</p>
@@ -559,10 +740,10 @@ function firmBlock(d) {
     <h2>Firm demand vs forecast</h2>
     <p class="muted">Customer POs already raised and not yet on hire, converted to this item’s units (waiting × avg LM/hire × qty/m). Expected hire month = date raised + that builder’s average days to on hire. This does not change the FileMaker formula — it tells you how much of the peak is already contracted.</p>
     <div class="cards">
-      <div class="card ${cardTone}"><div class="label">PO cover of peak</div><div class="val">${cover}</div></div>
-      <div class="card"><div class="label">Firm units waiting</div><div class="val">${num(Math.round(c.firmUnits))}</div></div>
-      <div class="card"><div class="label">Peak forecast OUT</div><div class="val">${num(Math.round(c.peakOut))}</div></div>
-      <div class="card"><div class="label">Conversion days</div><div class="val">${c.avgDays == null ? "—" : daysf(c.avgDays)}</div></div>
+      ${kpiCard("PO cover of peak", cover, "", TIPS.poCover, cardTone)}
+      ${kpiCard("Firm units waiting", num(Math.round(c.firmUnits)), "", TIPS.firmWaiting)}
+      ${kpiCard("Peak forecast OUT", num(Math.round(c.peakOut)), "", TIPS.peakOut)}
+      ${kpiCard("Conversion days", c.avgDays == null ? "—" : daysf(c.avgDays), "", TIPS.conversionDays)}
     </div>
     <div class="why ${cardTone ? "card " + cardTone : ""}"><p>${sentences[tone] || sentences["no-data"]}</p></div>
   `;
@@ -642,14 +823,14 @@ function demandChart(months, refs) {
       ${poLine}${poDots}
     </svg>
     <div class="legend">
-      <span><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
-      <span><i class="sw" style="background:#3fb950"></i>IN returning</span>
-      <span><i class="sw" style="background:#f85149"></i>NET extra held</span>
-      <span><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
-      <span><i class="sw" style="background:#d29922"></i>Projected in service</span>
-      <span><i class="sw" style="background:#39d0d8"></i>PO-backed starts</span>
-      <span><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
-      <span><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
+      <span${tipAttr(TIPS.outStarts, "OUT starts")}><i class="sw" style="background:#4f9cf9"></i>OUT starts</span>
+      <span${tipAttr(TIPS.inReturning, "IN returning")}><i class="sw" style="background:#3fb950"></i>IN returning</span>
+      <span${tipAttr(TIPS.netHeld, "NET extra held")}><i class="sw" style="background:#f85149"></i>NET extra held</span>
+      <span${tipAttr(TIPS.netReleased, "NET released")}><i class="sw" style="background:#a371f7"></i>NET released (IN &gt; OUT)</span>
+      <span${tipAttr(TIPS.projectedIS, "Projected in service")}><i class="sw" style="background:#d29922"></i>Projected in service</span>
+      <span${tipAttr(TIPS.poBacked, "PO-backed starts")}><i class="sw" style="background:#39d0d8"></i>PO-backed starts</span>
+      <span${tipAttr(TIPS.requiredLine, "Required")}><i class="sw" style="background:transparent;border:1px dashed #f85149"></i>Required</span>
+      <span${tipAttr(TIPS.coverLine, "Stock + on order")}><i class="sw" style="background:transparent;border:1px dashed #8b98a5"></i>Stock + on order</span>
     </div>
   </div>`;
 }
@@ -676,20 +857,20 @@ function drawDemand() {
     : "";
   const kpis = familyMode
     ? [
-        ["Forecast max IS", num(fam.forecastMax)],
-        ["Required at target", num(fam.required)],
-        ["Total + on order", num(fam.cover)],
-        ["Shortfall", num(fam.shortfall), cls(-fam.shortfall)],
-        ["Proposed buy", fam.orderQty ? num(fam.orderQty) : "—"],
-        ["Now in service", num(fam.inService)],
+        ["Forecast max IS", num(fam.forecastMax), "", TIPS.forecastMax],
+        ["Required at target", num(fam.required), "", TIPS.required],
+        ["Total + on order", num(fam.cover), "", TIPS.cover],
+        ["Shortfall", num(fam.shortfall), cls(-fam.shortfall), TIPS.shortfall],
+        ["Proposed buy", fam.orderQty ? num(fam.orderQty) : "—", "", TIPS.proposedBuy],
+        ["Now in service", num(fam.inService), "", TIPS.nowInService],
       ]
     : [
-        ["Forecast max IS", num(it.forecastMax)],
-        ["Required at target", num(d.required)],
-        ["Total + on order", num(d.cover)],
-        ["Shortfall", num(d.shortfall), cls(-d.shortfall)],
-        ["Proposed buy", it.orderQty ? num(it.orderQty) : "—"],
-        ["Now in service", num(it.inService)],
+        ["Forecast max IS", num(it.forecastMax), "", TIPS.forecastMax],
+        ["Required at target", num(d.required), "", TIPS.required],
+        ["Total + on order", num(d.cover), "", TIPS.cover],
+        ["Shortfall", num(d.shortfall), cls(-d.shortfall), TIPS.shortfall],
+        ["Proposed buy", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
+        ["Now in service", num(it.inService), "", TIPS.nowInService],
       ];
   const refs = {
     required: familyMode ? fam.required : d.required,
@@ -711,7 +892,7 @@ function drawDemand() {
       <p class="muted">${familyMode ? "Family totals sum each item’s units (LM × that item’s qty/m). Hires are not summed — the same job uses many items." : esc(d.note)} Source ${esc(d.sfFile)}${d.sfExport ? " · " + esc(d.sfExport) : ""}.</p>
     </div>
     <div class="cards">
-      ${kpis.map(([label, val, klass]) => `<div class="card"><div class="label">${label}</div><div class="val ${klass||""}">${val}</div></div>`).join("")}
+      ${kpis.map(([label, val, klass, def]) => kpiCard(label, val, klass, def)).join("")}
     </div>
     ${familyMode ? "" : firmBlock(d)}
     <h2>Demand over the forecast period</h2>
@@ -723,23 +904,27 @@ function drawDemand() {
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Month</th><th>Working days</th>
-          ${familyMode ? "" : "<th>Hires</th>"}
-          <th>OUT units</th>${familyMode ? "" : "<th>PO-backed</th>"}<th>IN units</th><th>NET units</th>
-          <th>Projected IS</th>
-          ${familyMode ? "" : "<th>OUT LM</th><th>NET LM</th>"}
+          ${thTip("Month", "Forecast month. Peak is the strongest new-site starts.", true)}
+          ${thTip("Working days", TIPS.workingDays)}
+          ${familyMode ? "" : thTip("Hires", TIPS.hires)}
+          ${thTip("OUT units", TIPS.outStarts)}
+          ${familyMode ? "" : thTip("PO-backed", TIPS.poBacked)}
+          ${thTip("IN units", TIPS.inReturning)}
+          ${thTip("NET units", TIPS.netHeld)}
+          ${thTip("Projected IS", TIPS.projectedIS)}
+          ${familyMode ? "" : thTip("OUT LM", TIPS.outLm) + thTip("NET LM", TIPS.netLm)}
         </tr></thead>
         <tbody>${months.map(m => `
           <tr class="${m.index===peak.index?"order":""}">
-            <td class="l">${esc((m.date||"").slice(0,7) || ("M"+m.index))}${m.index===peak.index?" · peak starts":""}</td>
-            <td>${m.workingDays||"—"}</td>
-            ${familyMode ? "" : `<td>${num(m.hires)}</td>`}
-            <td>${num(Math.round(m.outUnits))}</td>
-            ${familyMode ? "" : `<td>${m.poUnits ? num(Math.round(m.poUnits)) : "—"}</td>`}
-            <td>${num(Math.round(m.inUnits))}</td>
-            <td class="${cls(m.netUnits)}">${num(Math.round(m.netUnits))}</td>
-            <td>${num(Math.round(m.projectedInService))}</td>
-            ${familyMode ? "" : `<td>${num(Math.round(m.outLm))}</td><td class="${cls(m.netLm)}">${num(Math.round(m.netLm))}</td>`}
+            ${tdTip(esc((m.date||"").slice(0,7) || ("M"+m.index)) + (m.index===peak.index?" · peak starts":""), "Forecast month. Peak is the strongest new-site starts.", "", true)}
+            ${tdTip(m.workingDays||"—", TIPS.workingDays)}
+            ${familyMode ? "" : tdTip(num(m.hires), TIPS.hires)}
+            ${tdTip(num(Math.round(m.outUnits)), TIPS.outStarts)}
+            ${familyMode ? "" : tdTip(m.poUnits ? num(Math.round(m.poUnits)) : "—", TIPS.poBacked)}
+            ${tdTip(num(Math.round(m.inUnits)), TIPS.inReturning)}
+            ${tdTip(num(Math.round(m.netUnits)), TIPS.netHeld, cls(m.netUnits))}
+            ${tdTip(num(Math.round(m.projectedInService)), TIPS.projectedIS)}
+            ${familyMode ? "" : tdTip(num(Math.round(m.outLm)), TIPS.outLm) + tdTip(num(Math.round(m.netLm)), TIPS.netLm, cls(m.netLm))}
           </tr>`).join("")}</tbody>
       </table>
     </div>
@@ -749,22 +934,22 @@ function drawDemand() {
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Item</th><th>Forecast max</th><th>Required</th><th>Cover</th>
-          <th>Shortfall</th><th>Proposed buy</th><th>Buy $</th>
-          <th>Peak OUT</th><th>Now IS</th><th>Total stock</th>
+          ${thTip("Item", TIPS.item, true)}${thTip("Forecast max", TIPS.forecastMax)}${thTip("Required", TIPS.required)}${thTip("Cover", TIPS.cover)}
+          ${thTip("Shortfall", TIPS.shortfall)}${thTip("Proposed buy", TIPS.proposedBuy)}${thTip("Buy $", TIPS.orderCost)}
+          ${thTip("Peak OUT", TIPS.peakOut)}${thTip("Now IS", TIPS.nowInService)}${thTip("Total stock", TIPS.totalStock)}
         </tr></thead>
         <tbody>${(fam.members||[]).map(m => `
           <tr class="clickable ${m.code===it.code?"order":""}" data-code="${esc(m.code)}">
-            <td class="l"><b>${esc(m.code)}</b><div class="muted">${esc(clip(m.name,15))}</div></td>
-            <td>${num(m.forecastMax)}</td>
-            <td>${num(m.required)}</td>
-            <td>${num(m.cover)}</td>
-            <td class="${cls(-m.shortfall)}">${num(m.shortfall)}</td>
-            <td>${m.orderQty?num(m.orderQty):""}</td>
-            <td>${m.orderCost?aud(m.orderCost):""}</td>
-            <td>${num(Math.round(m.peakOut))}</td>
-            <td>${num(m.inService)}</td>
-            <td><b>${num(m.totalStock)}</b></td>
+            ${tdTip(`<b>${esc(m.code)}</b><div class="muted">${esc(clip(m.name,15))}</div>`, TIPS.item, "", true)}
+            ${tdTip(num(m.forecastMax), TIPS.forecastMax)}
+            ${tdTip(num(m.required), TIPS.required)}
+            ${tdTip(num(m.cover), TIPS.cover)}
+            ${tdTip(num(m.shortfall), TIPS.shortfall, cls(-m.shortfall))}
+            ${tdTip(m.orderQty?num(m.orderQty):"", TIPS.proposedBuy)}
+            ${tdTip(m.orderCost?aud(m.orderCost):"", TIPS.orderCost)}
+            ${tdTip(num(Math.round(m.peakOut)), TIPS.peakOut)}
+            ${tdTip(num(m.inService), TIPS.nowInService)}
+            ${tdTip(`<b>${num(m.totalStock)}</b>`, TIPS.totalStock)}
           </tr>`).join("")}</tbody>
       </table>
     </div>` : `
@@ -773,24 +958,25 @@ function drawDemand() {
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Product</th><th>Qty / m</th><th>Prior month</th><th>Change</th>
-          <th>Days now</th><th>Days was</th><th>Δ days</th>
-          <th>Peak OUT units</th><th>Peak hires</th>
+          ${thTip("Product", "Hire product that uses this item.", true)}
+          ${thTip("Qty / m", TIPS.qtyM)}${thTip("Prior month", TIPS.priorRate)}${thTip("Change", TIPS.rateChange)}
+          ${thTip("Days now", TIPS.daysNow)}${thTip("Days was", TIPS.daysWas)}${thTip("Δ days", TIPS.deltaDays)}
+          ${thTip("Peak OUT units", TIPS.peakOutUnits)}${thTip("Peak hires", TIPS.peakHires)}
         </tr></thead>
         <tbody>${d.products.map(p => {
           const pm = p.months[peak.index-1] || p.months[0] || {};
           const ch = p.rateDelta == null ? "—" : ((p.rateDelta>0?"+":"")+p.rateDelta.toFixed(4));
           const pd = (dur.byProduct || []).find(x => x.code === p.code) || {};
           return `<tr>
-            <td class="l"><b>${esc(p.code)}</b><div class="muted">${esc(p.name)}</div></td>
-            <td>${p.rate.toFixed(4)}</td>
-            <td>${p.priorRate==null?"—":p.priorRate.toFixed(4)}</td>
-            <td class="${p.rateDelta>0?"neg":p.rateDelta<0?"pos":""}">${ch}</td>
-            <td>${daysf(pd.days)}</td>
-            <td>${daysf(pd.priorDays)}</td>
-            <td class="${pd.delta>0?"neg":pd.delta<0?"pos":""}">${signed(pd.delta, 1)}</td>
-            <td>${num(Math.round(pm.outUnits||0))}</td>
-            <td>${num(pm.hires||0)}</td>
+            ${tdTip(`<b>${esc(p.code)}</b><div class="muted">${esc(p.name)}</div>`, "Hire product that uses this item.", "", true)}
+            ${tdTip(p.rate.toFixed(4), TIPS.qtyM)}
+            ${tdTip(p.priorRate==null?"—":p.priorRate.toFixed(4), TIPS.priorRate)}
+            ${tdTip(ch, TIPS.rateChange, p.rateDelta>0?"neg":p.rateDelta<0?"pos":"")}
+            ${tdTip(daysf(pd.days), TIPS.daysNow)}
+            ${tdTip(daysf(pd.priorDays), TIPS.daysWas)}
+            ${tdTip(signed(pd.delta, 1), TIPS.deltaDays, pd.delta>0?"neg":pd.delta<0?"pos":"")}
+            ${tdTip(num(Math.round(pm.outUnits||0)), TIPS.peakOutUnits)}
+            ${tdTip(num(pm.hires||0), TIPS.peakHires)}
           </tr>`;
         }).join("")}</tbody>
       </table>
@@ -800,33 +986,36 @@ function drawDemand() {
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          <th class="l">Company</th><th class="l">AM</th>
-          <th class="l">Latest PO</th><th>POs</th><th>Contracts</th>          <th>Waiting</th><th>Firm units</th>
-          <th>Avg days to on hire</th>
-          <th>Days now</th><th>Days was</th><th>Δ days</th>
-          <th>Avg LM/hire</th>
-          <th>Hires</th><th>OUT LM</th><th>NET LM</th><th>This item units</th>
+          ${thTip("Company", "Customer driving peak-month starts.", true)}
+          ${thTip("AM", "Account manager on that customer.", true)}
+          ${thTip("Latest PO", TIPS.latestPo, true)}
+          ${thTip("POs", TIPS.poCount)}${thTip("Contracts", TIPS.contracts)}
+          ${thTip("Waiting", TIPS.waiting)}${thTip("Firm units", TIPS.firmUnits)}
+          ${thTip("Avg days to on hire", TIPS.avgDaysHire)}
+          ${thTip("Days now", TIPS.daysNow)}${thTip("Days was", TIPS.daysWas)}${thTip("Δ days", TIPS.deltaDays)}
+          ${thTip("Avg LM/hire", TIPS.avgLm)}
+          ${thTip("Hires", TIPS.hires)}${thTip("OUT LM", TIPS.outLm)}${thTip("NET LM", TIPS.netLm)}${thTip("This item units", TIPS.thisItemUnits)}
         </tr></thead>
         <tbody>${d.companies.map(c => {
           const po = c.po || {};
           const poTitle = (po.poNumbers || []).join(", ");
           return `<tr>
-            <td class="l">${esc(c.company)}</td>
-            <td class="l muted">${esc(c.manager)}</td>
-            <td class="l" title="${esc(poTitle)}">${esc(po.latestPo || "—")}${po.latestRaised ? `<div class="muted">${esc(po.latestRaised)}</div>` : ""}</td>
-            <td>${po.withPo != null ? num(po.withPo) : "—"}</td>
-            <td>${po.contracts != null ? num(po.contracts) : "—"}</td>
-            <td class="${po.waiting>0?"neg":""}">${po.waiting ? num(po.waiting) : "—"}</td>
-            <td>${c.firmUnits ? num(Math.round(c.firmUnits)) : "—"}</td>
-            <td>${po.avgDays==null?"—":daysf(po.avgDays)}</td>
-            <td>${c.avgDays?daysf(c.avgDays):"—"}</td>
-            <td>${daysf(c.priorDays)}</td>
-            <td class="${c.daysDelta>0?"neg":c.daysDelta<0?"pos":""}">${signed(c.daysDelta, 1)}</td>
-            <td>${c.avgQty?c.avgQty.toFixed(1):"—"}</td>
-            <td>${num(c.hires)}</td>
-            <td>${num(Math.round(c.outLm))}</td>
-            <td class="${cls(c.netLm)}">${num(Math.round(c.netLm))}</td>
-            <td><b>${num(Math.round(c.units))}</b></td>
+            ${tdTip(esc(c.company), "Customer driving peak-month starts.", "", true)}
+            ${tdTip(esc(c.manager), "Account manager on that customer.", "muted", true)}
+            ${tdTip(esc(po.latestPo || "—") + (po.latestRaised ? `<div class="muted">${esc(po.latestRaised)}</div>` : ""), TIPS.latestPo + (poTitle ? " " + poTitle : ""), "", true)}
+            ${tdTip(po.withPo != null ? num(po.withPo) : "—", TIPS.poCount)}
+            ${tdTip(po.contracts != null ? num(po.contracts) : "—", TIPS.contracts)}
+            ${tdTip(po.waiting ? num(po.waiting) : "—", TIPS.waiting, po.waiting>0?"neg":"")}
+            ${tdTip(c.firmUnits ? num(Math.round(c.firmUnits)) : "—", TIPS.firmUnits)}
+            ${tdTip(po.avgDays==null?"—":daysf(po.avgDays), TIPS.avgDaysHire)}
+            ${tdTip(c.avgDays?daysf(c.avgDays):"—", TIPS.daysNow)}
+            ${tdTip(daysf(c.priorDays), TIPS.daysWas)}
+            ${tdTip(signed(c.daysDelta, 1), TIPS.deltaDays, c.daysDelta>0?"neg":c.daysDelta<0?"pos":"")}
+            ${tdTip(c.avgQty?c.avgQty.toFixed(1):"—", TIPS.avgLm)}
+            ${tdTip(num(c.hires), TIPS.hires)}
+            ${tdTip(num(Math.round(c.outLm)), TIPS.outLm)}
+            ${tdTip(num(Math.round(c.netLm)), TIPS.netLm, cls(c.netLm))}
+            ${tdTip(`<b>${num(Math.round(c.units))}</b>`, TIPS.thisItemUnits)}
           </tr>`;
         }).join("")}</tbody>
       </table>
