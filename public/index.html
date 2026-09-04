@@ -94,19 +94,19 @@
 <header>
   <div>
     <h1>Stock Review</h1>
-    <div class="sub">System requested shortfall from the submitted Sales Forecast. Decision is the GM override — empty until someone types it.</div>
+    <div class="sub">Buy ask is the last forecast month only (December on a September file). Peak months are highlighted for ops / transfers — not a dollar ask. Decision is the GM override.</div>
   </div>
   <div class="row">
     <div class="seg" id="states"></div>
     <select id="month"></select>
-    <button class="btn" id="onlyOrders" data-tip-title="Shortfall lines only" data-tip="Show only SKUs with a system-requested shortfall. Turn off to see the whole fleet.">Shortfall lines only</button>
+    <button class="btn" id="onlyOrders" data-tip-title="Buy lines only" data-tip="Show only SKUs with a buy-month shortfall. Peak / too-late months are not in this list.">Buy lines only</button>
     <input type="search" id="q" placeholder="Search code or name" />
     <a class="btn primary" id="export" href="#" data-tip-title="Export Excel" data-tip="Download this state’s Details grid as an Excel file, including Decision values.">Export Excel</a>
   </div>
 </header>
 <div class="wrap">
   <div class="tabs" id="tabs">
-    <button class="on" data-view="details" data-tip-title="Details" data-tip="System-requested shortfall grid — stock, surplus, and GM Decision.">Details</button>
+    <button class="on" data-view="details" data-tip-title="Details" data-tip="Buy-month shortfall grid — stock, surplus, and GM Decision. Peak is shown for ops, not as a dollar ask.">Details</button>
     <button data-view="demand" id="tabDemand" disabled data-tip-title="Demand" data-tip="Why this item is on the ask: forecast starts, customer POs, and hire duration. Click a row first.">Demand</button>
     <button data-view="stocktakes" data-tip-title="Stocktakes" data-tip="Last FileMaker stocktake date versus the forecast cache date.">Stocktakes</button>
   </div>
@@ -141,7 +141,7 @@ let staleDays = 14;
 let staleOnly = true;
 let stockSort = "stale";
 let gridSort = { key: "code", dir: "asc" };
-const TEXT_SORT = new Set(["code", "family"]);
+const TEXT_SORT = new Set(["code", "family", "peakMonthKey"]);
 
 const $ = (id) => document.getElementById(id);
 const aud = (n) => (n||0).toLocaleString("en-AU",{style:"currency",currency:"AUD",maximumFractionDigits:0});
@@ -153,13 +153,14 @@ const buyCost = (r) => (r && (r.sysCost || 0)) || 0;
 const onBuy = (r) => buyQty(r) > 0;
 
 const TIPS = {
-  originalAsk: "True fleet shortfall: SystemRequestedQty × landed cost. Equals max(0, −surplus). Not a GM ask and not FileMaker’s rounded OrderNumber.",
-  orderLines: "How many SKUs have a system-requested shortfall (SystemRequestedQty greater than zero).",
-  orderQtySum: "Total units of system-requested shortfall.",
-  shortfallSkus: "Items where stock + current orders is below what target utilisation needs. Same set as system-requested lines.",
-  systemRequested: "True fleet shortfall: SystemRequestedQty × landed cost. Equals max(0, −surplus).",
+  originalAsk: "Buy-month shortfall $: fleet needed for the last forecast month’s projected in-service, minus stock + on order. Peak-month shortfall is not in this number.",
+  orderLines: "How many SKUs are short for the buy month (last forecast month), not the peak.",
+  orderQtySum: "Total units of the buy-month shortfall.",
+  shortfallSkus: "Items where stock + current orders is below what the buy-month in-service needs at target utilisation.",
+  systemRequested: "Buy-month shortfall × landed cost. Peak / too-late months are excluded — those are ops / interstate transfers.",
+  peakOps: "Peak forecast month — strongest starts. Too late to buy; use transfers or other ops. Not in the dollar ask.",
   decisionSoFar: "Dollar value of quantities typed in the Decision column. $0 means no GM buy has been entered yet.",
-  familyChip: "Filter the grid to this family. The number is shortfall lines; the $ is system requested.",
+  familyChip: "Filter the grid to this family. The number is buy-month lines; the $ is the buy ask.",
   item: "Inventory code. Full name on the grey line. Click the row (not Decision) to open Demand.",
   family: "Product family this item belongs to.",
   landed: "Landed cost per unit — what one more unit costs to buy.",
@@ -169,21 +170,22 @@ const TIPS = {
   util: "In service ÷ total stock. How much of the fleet is out.",
   target: "FileMaker target utilisation. Required fleet = forecast peak in-service ÷ this target.",
   currentOrders: "Units already on order from suppliers, not yet in the fleet.",
-  surplus: "Stock + current orders − required. Negative is a shortfall and drives the proposed buy.",
-  orderQty: "System-requested shortfall qty (SystemRequestedQty). Same as max(0, −surplus).",
+  surplus: "Stock + current orders − buy-month required. Negative is the dollar ask. Peak shortfall is not included.",
+  orderQty: "Buy-month shortfall qty: max(0, required for last-forecast-month in-service − cover).",
   otherSug: "That other state’s FileMaker suggested buy for the same item — so you can see if they are already covering it.",
-  decision: "Type the qty you actually want to buy. This is the GM override of the system-requested shortfall.",
+  decision: "Type the qty you actually want to buy. This is the GM override of the buy-month shortfall.",
   decisionCost: "Decision qty × landed cost.",
-  systemQty: "FileMaker SystemRequestedQty — the true shortfall (−surplus).",
+  systemQty: "Buy-month shortfall qty. Not FileMaker’s peak-based SystemRequestedQty.",
   systemCost: "SystemRequestedQty × landed cost.",
   propSurplus: "Surplus after FileMaker’s proposed columns. Use Decision if you are buying a different qty.",
   propUtil: "Utilisation after FileMaker’s proposed columns.",
-  orderCost: "System-requested shortfall × landed cost for this line.",
-  forecastMax: "FileMaker Forecast Max: peak in-service this item is expected to hit (already on hire + net starts), not the sum of monthly OUT.",
-  required: "Fleet needed at target utilisation: ceil(forecast max ÷ target). This is the stock level system requested is trying to reach.",
+  orderCost: "Buy-month shortfall × landed cost for this line.",
+  forecastMax: "Peak in-service this forecast (FileMaker Forecast Max). Highlighted for ops / transfers. Not the buy ask.",
+  required: "Fleet needed at target utilisation for the buy month: ceil(last-forecast-month projected in-service ÷ target). Peak required is not used for the ask.",
   cover: "Total stock today + current supplier orders. What you already have or have bought.",
-  shortfall: "Required − cover. Positive means you are short; that is the system-requested buy.",
-  proposedBuy: "System-requested units to close the shortfall (SystemRequestedQty).",
+  shortfall: "Buy-month required − cover. Positive is the dollar ask. Peak-month gap is ops only.",
+  proposedBuy: "Units to buy for the last forecast month. Too-late months are excluded.",
+  opsGap: "How far peak in-service is above cover. Too late to buy — transfers or other ops, not this ask.",
   nowInService: "Units of this item on hire right now.",
   poCover: "Projected POs for the last forecast month (plus any hire after it, still inside the 4-month lead) as a % of that month’s forecast OUT. November is too soon to buy for. ≥70% treat the ask as firm; 40–70% mixed; under 40% go easier.",
   firmWaiting: "Customer POs already raised and not yet on hire. These usually mature in months 1–3 — too late to buy for. Use stock + current orders.",
@@ -729,7 +731,7 @@ function visibleRows() {
 }
 
 function stateOrderTip(st) {
-  return "System-requested shortfall $ for " + st + " from that state’s StockCalculator.";
+  return "Buy-month shortfall $ for " + st + ". Peak / too-late months are excluded.";
 }
 
 function draw() {
@@ -743,9 +745,9 @@ function draw() {
   $("banner").textContent =
     `${data.file} · cache ${data.cacheDate || "—"} · submitted ${data.forecastSubmitted || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}`;
   $("kpis").innerHTML = [
-    kpiCard("System requested", aud(t.sysCost), "", TIPS.systemRequested),
-    kpiCard("Shortfall lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("System qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard("Buy ask " + (data.buyMonthKey || ""), aud(t.sysCost), "", TIPS.systemRequested),
+    kpiCard("Buy lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard("Buy qty", num(t.orderQty), "", TIPS.orderQtySum),
     kpiCard("Decision so far", aud(t.decisionCost), "", TIPS.decisionSoFar),
   ].join("");
   const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
@@ -766,10 +768,11 @@ function draw() {
       ${thSort("Item", "code", TIPS.item, true)}${thSort("Family", "family", TIPS.family, true)}${thSort("Landed", "landed", TIPS.landed)}
       ${thSort("On Hand", "onHand", TIPS.onHand)}${thSort("In Service", "inService", TIPS.inService)}${thSort("Total Stock", "totalStock", TIPS.totalStock)}
       ${thSort("Util", "util", TIPS.util)}${thSort("Target", "targetUtil", TIPS.target)}${thSort("Current Orders", "currentOrders", TIPS.currentOrders)}
-      ${thSort("Surplus", "surplus", TIPS.surplus)}${thSort("System qty", "sysQty", TIPS.systemQty)}
+      ${thSort("Peak month", "peakMonthKey", TIPS.peakOps, true)}${thSort("Peak IS", "forecastMax", TIPS.forecastMax)}
+      ${thSort("Surplus", "surplus", TIPS.surplus)}${thSort("Buy qty", "sysQty", TIPS.systemQty)}
       ${thSort(others[0] + " sug.", "sug:" + others[0], TIPS.otherSug)}${thSort(others[1] + " sug.", "sug:" + others[1], TIPS.otherSug)}${thSort(others[2] + " sug.", "sug:" + others[2], TIPS.otherSug)}
       ${thSort("Decision", "decision", TIPS.decision)}${thSort("Decision $", "decisionCost", TIPS.decisionCost)}
-      ${thSort("System $", "sysCost", TIPS.systemCost)}
+      ${thSort("Buy $", "sysCost", TIPS.systemCost)}
       ${thSort("Prop. surplus", "proposedSurplus", TIPS.propSurplus)}${thSort("Prop. util", "proposedUtil", TIPS.propUtil)}
     </tr></thead>
     <tbody>${rows.map(r => `
@@ -783,6 +786,8 @@ function draw() {
         ${tdTip(pct(r.util), TIPS.util)}
         ${tdTip(pct(r.targetUtil), TIPS.target)}
         ${tdTip(num(r.currentOrders), TIPS.currentOrders)}
+        ${tdTip(esc(r.peakMonthKey || "—"), TIPS.peakOps, "", true)}
+        ${tdTip(r.forecastMax ? num(r.forecastMax) : "—", TIPS.forecastMax)}
         ${tdTip(num(r.surplus), TIPS.surplus, cls(r.surplus))}
         ${tdTip(buyQty(r)?num(buyQty(r)):"", TIPS.systemQty)}
         ${tdTip(r.suggested[others[0]]?num(r.suggested[others[0]]):"", TIPS.otherSug)}
@@ -804,7 +809,7 @@ function draw() {
   });
   bindGridSort();
   $("totals").innerHTML = `<table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Shortfall lines", TIPS.orderLines)}${thTip("System requested", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Buy lines", TIPS.orderLines)}${thTip("Buy ask", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
     <tbody>${data.families.filter(f => f.orderLines || f.sysCost || f.decisionCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
@@ -827,15 +832,15 @@ function drawNational() {
   const used = (data.byState || []).filter((s) => s.file);
   const prior = used.filter((s) => !s.exact).map((s) => s.state + " " + s.calcMonth);
   $("banner").textContent =
-    `National ${data.month} · system requested ${used.map((s) => s.state).join(" + ") || "—"}` +
+    `National ${data.month} · buy-month ask ${used.map((s) => s.state).join(" + ") || "—"}` +
     (data.forecastSubmitted ? ` · SF submitted ${data.forecastSubmitted}` : "") +
     (prior.length ? ` · prior calculator ${prior.join(", ")}` : "") +
     (data.modified ? ` · updated ${new Date(data.modified).toLocaleString("en-AU")}` : "");
   $("kpis").innerHTML = [
-    kpiCard("System requested", aud(t.sysCost), "", TIPS.systemRequested),
-    kpiCard("Shortfall lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("System qty", num(t.orderQty), "", TIPS.orderQtySum),
-    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national system-requested total."),
+    kpiCard("Buy ask", aud(t.sysCost), "", TIPS.systemRequested),
+    kpiCard("Buy lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard("Buy qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national buy-month total."),
   ].join("");
   const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
   $("families").innerHTML = fams.map(f =>
@@ -854,7 +859,7 @@ function drawNational() {
       ${thSort("Item", "code", TIPS.item, true)}${thSort("Family", "family", TIPS.family, true)}
       ${thSort("Total Stock", "totalStock", TIPS.totalStock)}
       ${STATES.map((s) => thSort(s + " $", "st:" + s, stateOrderTip(s))).join("")}
-      ${thSort("System qty", "sysQty", TIPS.systemQty)}${thSort("System requested", "sysCost", TIPS.systemRequested)}
+      ${thSort("Buy qty", "sysQty", TIPS.systemQty)}${thSort("Buy ask", "sysCost", TIPS.systemRequested)}
     </tr></thead>
     <tbody>${rows.map(r => `
       <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
@@ -871,7 +876,7 @@ function drawNational() {
   });
   bindGridSort();
   $("totals").innerHTML = `
-    <h2>By state — system-requested shortfall</h2>
+    <h2>By state — buy-month ask</h2>
     <p class="muted">Each state’s StockCalculator system requested for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
     <table>
       <thead><tr>
@@ -880,7 +885,7 @@ function drawNational() {
         ${thTip("Month", "Calculator month. Prior means that state has not filed a calculator for the selected month yet.")}
         ${thTip("Shortfall lines", TIPS.orderLines)}
         ${thTip("System qty", TIPS.orderQtySum)}
-        ${thTip("System requested", TIPS.systemRequested)}
+        ${thTip("Buy ask", TIPS.systemRequested)}
       </tr></thead>
       <tbody>${(data.byState || []).map((s) => `
         <tr>
@@ -903,7 +908,7 @@ function drawNational() {
     </table>
     <h2>By family</h2>
     <table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Shortfall lines", TIPS.orderLines)}${thTip("System requested", TIPS.systemRequested)}</tr></thead>
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Buy lines", TIPS.orderLines)}${thTip("Buy ask", TIPS.systemRequested)}</tr></thead>
     <tbody>${data.families.filter(f => f.orderLines || f.sysCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
@@ -1127,7 +1132,7 @@ function inputsBlock() {
       <p><b>Qty / m</b> — StockCalculator QtyPerM for this item on each hire product.</p>
       <p><b>Waiting POs / Avg days to on hire</b> — live ERP contracts, last 12 months. Waiting = PO raised and HireDate still empty. Days to on hire = DateRaised → HireDate (or InstallDateCompleted). That is how long a PO sits before it starts, not how long the job stays out.</p>
       <p><b>Projected POs</b> — each builder’s raise rate (90-day if they raised 2+, else 12-month average), minus raises already booked this month, then shifted by that ERP lag. Only the last forecast month — and after-SF months still inside the 4-month lead — count for this buy. November is not a buy month.</p>
-      <p><b>Required / cover</b> — Required = ceil(Forecast Max ÷ target utilisation). Cover = total stock + current supplier orders. FileMaker Forecast Max is peak in-service, not the sum of monthly OUT.</p>
+      <p><b>Required / cover / buy ask</b> — Required = ceil(buy-month projected in-service ÷ target utilisation). Cover = total stock + current supplier orders. The dollar ask is max(0, required − cover). Peak in-service is highlighted for ops / interstate transfers and is not in the ask — those earlier months were already decided.</p>
     </div>
   `;
 }
@@ -1428,12 +1433,12 @@ function drawDemand() {
   const why = nationalMode
     ? `${esc(nat.name || fam.name || "Family")} national view uses submitted Sales Forecast from ${(nat.statesUsed || []).join(", ") || "no states yet"} — not Forecast Orders. Peak submitted starts are ${num(Math.round(natPeakUnits))} family units${natPeakRow.key ? " in " + esc(natPeakRow.key) : ""}. System required from each state’s latest calculator is ${num(natTot.required || 0)}; stock + on order cover ${num(natTot.cover || 0)}, shortfall ${num(natTot.shortfall || 0)}.`
     : familyMode
-    ? `${esc(fam.name)} is ${num(fam.itemCount)} items in ${esc(state)}. Combined forecast peak in-service is ${num(fam.forecastMax)}. Required at each item’s target is ${num(fam.required)}. Stock + on order cover ${num(fam.cover)}, shortfall ${num(fam.shortfall)}. System requested across the family is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} shortfall lines).`
+    ? `${esc(fam.name)} is ${num(fam.itemCount)} items in ${esc(state)}. The buy ask uses last-forecast-month in-service, not the peak. Combined buy-month required is ${num(fam.required)}; stock + on order cover ${num(fam.cover)}; buy shortfall ${num(fam.shortfall)}. Buy ask is ${fam.orderQty ? num(fam.orderQty) + " units · " + aud(fam.orderCost) : "none"} (${num(fam.orderLines)} lines). Peak in-service ${num(fam.forecastMax)} is ops / transfers only.`
     : (it.orderQty > 0)
-      ? `${it.code} has a system-requested shortfall because forecast peak in-service is ${num(it.forecastMax)} units. At ${pct(it.targetUtil)} target utilisation you need ${num(d.required)} in the fleet. You have ${num(it.totalStock)} today plus ${num(it.currentOrders)} already on order (${num(d.cover)}). That leaves a shortfall of ${num(d.shortfall)}, so system requested is ${num(it.orderQty)}.`
-      : `${it.code} has no system-requested shortfall. Forecast peak in-service ${num(it.forecastMax)} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}.`;
+      ? `${it.code} is on the buy ask for the last forecast month (${esc(it.buyMonthKey || "month 4")}), when projected in-service is ${num(Math.round(d.buyIs || 0))}. At ${pct(it.targetUtil)} you need ${num(d.required)} in the fleet. Cover is ${num(d.cover)}, so the buy is ${num(it.orderQty)}. Peak in-service ${num(it.forecastMax)} in ${esc(it.peakMonthKey || peakLabel)} is too late to buy — transfers or other ops.`
+      : `${it.code} has no buy-month shortfall. Last-forecast-month in-service ${num(Math.round(d.buyIs || 0))} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}. Peak ${esc(it.peakMonthKey || peakLabel)} (${num(it.forecastMax)} IS) is ops only.`;
   const peakWhy = !nationalMode && peak.outUnits
-    ? ` Strongest new-site demand in this forecast is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}.`
+    ? ` Strongest new-site demand is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}. That month is too late for this buy — use interstate transfers or other ops, not dollars.`
     : "";
   const dur = d.duration || {};
   const durWhy = !familyMode && !nationalMode && dur.delta != null && Math.abs(dur.delta) >= 0.5
@@ -1450,19 +1455,19 @@ function drawDemand() {
       ]
     : familyMode
     ? [
-        ["Forecast max IS", num(fam.forecastMax), "", TIPS.forecastMax],
-        ["Required at target", num(fam.required), "", TIPS.required],
+        ["Peak IS (ops)", num(fam.forecastMax), "", TIPS.forecastMax],
+        ["Buy required", num(fam.required), "", TIPS.required],
         ["Total + on order", num(fam.cover), "", TIPS.cover],
-        ["Shortfall", num(fam.shortfall), cls(-fam.shortfall), TIPS.shortfall],
-        ["System requested", fam.orderQty ? num(fam.orderQty) : "—", "", TIPS.proposedBuy],
+        ["Buy shortfall", num(fam.shortfall), cls(-fam.shortfall), TIPS.shortfall],
+        ["Buy qty", fam.orderQty ? num(fam.orderQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(fam.inService), "", TIPS.nowInService],
       ]
     : [
-        ["Forecast max IS", num(it.forecastMax), "", TIPS.forecastMax],
-        ["Required at target", num(d.required), "", TIPS.required],
+        ["Peak IS (ops)", num(it.forecastMax), "", TIPS.forecastMax],
+        ["Buy month IS", num(Math.round(d.buyIs || 0)), "", "Projected in-service in the last forecast month — the only month this buy can serve."],
+        ["Buy required", num(d.required), "", TIPS.required],
         ["Total + on order", num(d.cover), "", TIPS.cover],
-        ["Shortfall", num(d.shortfall), cls(-d.shortfall), TIPS.shortfall],
-        ["System requested", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
+        ["Buy qty", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(it.inService), "", TIPS.nowInService],
       ];
   const refs = {
@@ -1537,8 +1542,8 @@ function drawDemand() {
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>
-          ${thTip("Item", TIPS.item, true)}${thTip("Forecast max", TIPS.forecastMax)}${thTip("Required", TIPS.required)}${thTip("Cover", TIPS.cover)}
-          ${thTip("Shortfall", TIPS.shortfall)}${thTip("System requested", TIPS.proposedBuy)}${thTip("System $", TIPS.orderCost)}
+          ${thTip("Item", TIPS.item, true)}${thTip("Peak IS (ops)", TIPS.forecastMax)}${thTip("Buy required", TIPS.required)}${thTip("Cover", TIPS.cover)}
+          ${thTip("Buy shortfall", TIPS.shortfall)}${thTip("Buy qty", TIPS.proposedBuy)}${thTip("Buy $", TIPS.orderCost)}
           ${thTip("Peak OUT", TIPS.peakOut)}${thTip("Now IS", TIPS.nowInService)}${thTip("Total stock", TIPS.totalStock)}
         </tr></thead>
         <tbody>${(fam.members||[]).map(m => `
@@ -1584,8 +1589,8 @@ function drawDemand() {
         }).join("")}</tbody>
       </table>
     </div>
-    <h2>Customers driving ${esc(peakLabel)} starts</h2>
-    <p class="muted">Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m. Firm units = waiting POs × avg LM/hire × qty/m. ${esc(d.poSource || "Customer POs from live ERP.")} Waiting = PO raised, not yet on hire.</p>
+    <h2>Customers driving ${esc(peakLabel)} starts <span class="muted">(ops / transfers — not this buy)</span></h2>
+    <p class="muted">Peak-month starts only — too late to buy. Use this list for interstate transfers and other ops. Days weighted by that customer’s peak LM. Units = forecast LM × this item’s qty/m. ${esc(d.poSource || "Customer POs from live ERP.")}</p>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr>

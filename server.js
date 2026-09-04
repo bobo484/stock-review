@@ -17,6 +17,31 @@ const FORECAST_DIR =
 const DATA_DIR = path.join(__dirname, "data");
 const DECISIONS_FILE = path.join(DATA_DIR, "decisions.json");
 const STATES = ["QLD", "NSW", "VIC", "SA"];
+const BUY_INDEX = 4;
+
+function fleetNeed(inService, targetUtil) {
+  const need = Number(inService) || 0;
+  if (need <= 0) return 0;
+  if (targetUtil > 0) return Math.ceil(need / targetUtil);
+  return Math.ceil(need);
+}
+
+function applyBuyAsk(row, buyIs) {
+  const cover = (row.totalStock || 0) + (row.currentOrders || 0);
+  const required = fleetNeed(buyIs, row.targetUtil);
+  const surplus = cover - required;
+  const qty = Math.max(0, Math.round(-surplus));
+  row.buyIs = buyIs;
+  row.required = required;
+  row.cover = cover;
+  row.surplus = surplus;
+  row.shortfall = required - cover;
+  row.sysQty = qty;
+  row.sysCost = qty * (row.landed || 0);
+  row.orderQty = qty;
+  row.orderCost = row.sysCost;
+  row.opsGap = Math.max(0, fleetNeed(row.forecastMax, row.targetUtil) - cover);
+}
 
 function num(v) {
   if (v == null || v === "" || v === "?") return 0;
@@ -117,6 +142,12 @@ function mapRow(it, state) {
     orderCost: sysCost,
     sysQty,
     sysCost,
+    fmQty: sysQty,
+    fmCost: sysCost,
+    peakMonthKey: "",
+    buyMonthKey: "",
+    buyIs: 0,
+    opsGap: 0,
     suggested: suggestedInto(it, state),
     proposedSurplus: num(it[`${state}_ProposedSurplus`]),
     proposedUtil: num(it[`${state}_ProposedUtil`]),
@@ -404,16 +435,21 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
     return { ...m, projectedInService: running };
   });
   const peak = trajectory.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), trajectory[0] || { index: 1, outUnits: 0 });
-  const required = item.targetUtil > 0 ? Math.ceil(item.forecastMax / item.targetUtil) : item.forecastMax;
-  const cover = item.totalStock + item.currentOrders;
+  const buyMonth = trajectory.find((m) => m.index === BUY_INDEX) || trajectory[trajectory.length - 1];
+  const buyIs = buyMonth ? buyMonth.projectedInService : item.inService;
+  applyBuyAsk(item, buyIs);
+  item.peakMonthKey = peak.date ? String(peak.date).slice(0, 7) : "";
+  item.buyMonthKey = buyMonth && buyMonth.date ? String(buyMonth.date).slice(0, 7) : "";
   return {
     item,
     products,
     months: trajectory,
     peakMonth: peak,
-    required,
-    cover,
-    shortfall: required - cover,
+    buyMonth,
+    buyIs,
+    required: item.required,
+    cover: item.cover,
+    shortfall: item.shortfall,
   };
 }
 
@@ -708,6 +744,9 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
       inService: p.item.inService,
       totalStock: p.item.totalStock,
       peakOut: p.peakMonth.outUnits || 0,
+      peakMonthKey: p.item.peakMonthKey || "",
+      buyIs: p.buyIs || 0,
+      buyMonthKey: p.item.buyMonthKey || "",
     }))
     .sort((a, b) => b.orderCost - a.orderCost || b.peakOut - a.peakOut);
   return {
@@ -792,7 +831,7 @@ function buildConversion(companies, months, peak) {
         hire.setDate(hire.getDate() + Math.round(lag));
         const key = monthKeyFromDate(hire);
         const slot = monthIx[key] != null ? byMonth[monthIx[key]] : null;
-        if (slot && slot.index >= 4) slot.projUnits += expected * unitPerHire;
+        if (slot && slot.index >= BUY_INDEX) slot.projUnits += expected * unitPerHire;
         else if (afterLast && hire >= afterLast && monthOffset(key) <= leadMonths) {
           beyondByKey[key] = (beyondByKey[key] || 0) + expected * unitPerHire;
         }
@@ -803,7 +842,7 @@ function buildConversion(companies, months, peak) {
   const peakOut = peak && peak.outUnits ? peak.outUnits : 0;
   const peakKey = peak && peak.date ? String(peak.date).slice(0, 7) : "";
   const peakPoUnits = (byMonth.find((m) => m.key === peakKey) || {}).poUnits || 0;
-  const buyMonths = byMonth.filter((m) => m.index >= 4);
+  const buyMonths = byMonth.filter((m) => m.index >= BUY_INDEX);
   const beyondMonths = Object.keys(beyondByKey).sort().map((k) => ({
     key: k,
     projUnits: beyondByKey[k],
@@ -979,7 +1018,7 @@ async function buildDemand(state, month, code) {
     conversion = buildConversion(companiesOut, trajectory, peak);
     companiesOut = conversion.companies;
     poSource =
-      "Live ERP contracts (last 12 months). Waiting POs = already raised, not yet on hire. Projected POs = each builder’s recent raise rate, timed by their days-to-on-hire, onto months 3–4 (4-month stock lead).";
+      "Live ERP contracts (last 12 months). Waiting POs = already raised, not yet on hire. Projected POs = each builder’s recent raise rate, timed by their days-to-on-hire, onto the last forecast month only.";
   } catch (err) {
     poSource = `Customer POs unavailable: ${err.message}`;
   }
@@ -1003,8 +1042,33 @@ async function buildDemand(state, month, code) {
     poSource,
     conversion,
     note:
-      "Units ≈ forecast LM × this item's Qty per metre. FileMaker Forecast Max is peak in-service (already on hire + net starts), not the sum of monthly OUT.",
+      "The dollar ask uses projected in-service in the last forecast month (the buy month), not the peak. Peak starts are highlighted for ops / interstate transfers — too late to buy. Units ≈ forecast LM × this item's Qty per metre.",
+    buyMonth: computed.buyMonth,
+    buyIs: computed.buyIs,
   };
+}
+
+function attachBuyWindowAsks(state, month, items, rows) {
+  const byCode = new Map((rows || []).map((r) => [r.code, r]));
+  let buyKey = "";
+  try {
+    const sf = loadSalesForecast(state, month);
+    const { monthMeta, productIndex } = indexSalesForecast(sf.records);
+    const monthCache = productMonthCache(productIndex, monthMeta);
+    const buyMeta = monthMeta.find((m) => m.index === BUY_INDEX) || monthMeta[monthMeta.length - 1];
+    buyKey = buyMeta && buyMeta.date ? String(buyMeta.date).slice(0, 7) : "";
+    for (const it of items || []) {
+      const row = byCode.get(String(it.InventoryCode || ""));
+      if (!row) continue;
+      const computed = computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache);
+      row.peakMonthKey = computed.item.peakMonthKey || "";
+      row.buyMonthKey = computed.item.buyMonthKey || buyKey;
+      applyBuyAsk(row, computed.buyIs);
+    }
+  } catch {
+    for (const row of rows || []) applyBuyAsk(row, row.forecastMax);
+  }
+  return buyKey;
 }
 
 function buildDetails(state, month) {
@@ -1014,6 +1078,7 @@ function buildDetails(state, month) {
     .map((it) => mapRow(it, state))
     .filter((r) => r.code)
     .sort((a, b) => a.code.localeCompare(b.code));
+  const buyMonthKey = attachBuyWindowAsks(state, month, items, rows);
   const decisions = loadDecisions()[decisionKey(state, month)] || {};
   for (const r of rows) {
     const d = decisions[r.code];
@@ -1054,6 +1119,8 @@ function buildDetails(state, month) {
     },
     families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
     rows,
+    buyMonthKey,
+    askBasis: "buy-month",
   };
 }
 
@@ -1768,7 +1835,7 @@ app.get("/api/export.xlsx", async (req, res) => {
       const data = buildNationalDetails(month);
       const wb = new ExcelJS.Workbook();
       const by = wb.addWorksheet("BY STATE");
-      by.addRow(["System requested from each state’s StockCalculator — the true shortfall, not a GM Forecast Order."]);
+      by.addRow(["Buy ask is last-forecast-month in-service only. Peak / too-late months are excluded."]);
       by.addRow(["State", "Calculator", "Month", "Exact month", "Lines", "System qty", "System requested"]);
       for (const s of data.byState) {
         by.addRow([s.state, s.file || "—", s.calcMonth || "—", s.exact ? "Yes" : "Prior file", s.orderLines, s.orderQty, s.sysCost]);
