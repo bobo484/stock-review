@@ -175,6 +175,16 @@ function sfNum(row, field) {
   return num(row[field]);
 }
 
+function sfForecastLm(row, index) {
+  const total = sfNum(row, `Forecast Month${index}_c_TotalLM`);
+  if (total) return total;
+  const submitted = sfNum(row, `Forecast Month${index}_c_Submitted_LM`);
+  if (submitted) return submitted;
+  const ave = sfNum(row, `Forecast Month${index}_c_TotalLM_UsingAve`);
+  if (ave) return ave;
+  return sfNum(row, `Forecast Month${index}_TotalLM_Override`);
+}
+
 function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, priorMonthId }) {
   let wDays = 0;
   let w = 0;
@@ -191,7 +201,7 @@ function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, p
     let pPriorDays = 0;
     let pPriorW = 0;
     for (const rec of info.rows) {
-      const outLm = sfNum(rec, `Forecast Month${peakIdx}_c_TotalLM`);
+      const outLm = sfForecastLm(rec, peakIdx);
       if (outLm <= 0) continue;
       const units = outLm * p.rate;
       const days = num(rec.CompanyProduct_cv_AvgDays);
@@ -293,7 +303,7 @@ function productMonthCache(productIndex, monthMeta) {
       let netLm = 0;
       let hires = 0;
       for (const r of info.rows) {
-        outLm += sfNum(r, `Forecast Month${m.index}_c_TotalLM`);
+        outLm += sfForecastLm(r, m.index);
         netLm += sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`);
         hires += sfNum(r, `Forecast Month${m.index}_NoOfHires`);
       }
@@ -316,7 +326,7 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
       const tot = cached
         ? cached[i]
         : (() => {
-            const outLm = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_c_TotalLM`), 0);
+            const outLm = info.rows.reduce((s, r) => s + sfForecastLm(r, m.index), 0);
             const netLm = info.rows.reduce((s, r) => s + sfNum(r, `StockReturning Net Month ${m.index}_NetRequired`), 0);
             const hires = info.rows.reduce((s, r) => s + sfNum(r, `Forecast Month${m.index}_NoOfHires`), 0);
             return { outLm, netLm, hires, inLm: outLm - netLm };
@@ -389,7 +399,88 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
   };
 }
 
-function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, monthCache) {
+function sumSfField(rows, field) {
+  if (!field) return 0;
+  return (rows || []).reduce((s, r) => s + sfNum(r, field), 0);
+}
+
+function buildFamilyTimeline(familyItems, state, records, monthMeta, productIndex) {
+  const first = records[0] || {};
+  const slots = [
+    {
+      date: first.CompanyProduct_g_ForecastDate_Minus2,
+      role: "history",
+      fLm: "Forecast Month Minus 2_c_Submitted_LM",
+      aLm: "CompanyProduct_cv_ContractAvgQty_Total_MonthMinus2",
+      fH: "Forecast Month Minus 2_NoOfHires",
+      aH: "CompanyProduct_cv_ContractCountMonthMinus2",
+    },
+    {
+      date: first.CompanyProduct_g_ForecastDate_Minus1,
+      role: "history",
+      fLm: "Forecast Month Minus 1_c_Submitted_LM",
+      aLm: "CompanyProduct_cv_ContractAvgQty_Total_MonthMinus1",
+      fH: "Forecast Month Minus 1_NoOfHires",
+      aH: "CompanyProduct_cv_ContractCountMonthMinus1",
+    },
+    ...monthMeta.map((m) => ({
+      date: m.date,
+      role: "forecast",
+      monthIndex: m.index,
+      aLm: null,
+      fH: `Forecast Month${m.index}_NoOfHires`,
+      aH: null,
+    })),
+  ];
+  const items = (familyItems || []).map((it) => ({
+    rates: parseQtyPerM(it[`${state}_QtyPerM_JSON`]),
+  }));
+  return slots.map((slot) => {
+    let forecastOut = 0;
+    let actualOut = 0;
+    let forecastLm = 0;
+    let actualLm = 0;
+    let forecastHires = 0;
+    let actualHires = 0;
+    const seen = new Set();
+    for (const it of items) {
+      for (const [pid, rate] of Object.entries(it.rates || {})) {
+        if (num(rate) <= 0) continue;
+        const info = productIndex[pid];
+        if (!info) continue;
+        const fLm = slot.monthIndex
+          ? info.rows.reduce((s, r) => s + sfForecastLm(r, slot.monthIndex), 0)
+          : sumSfField(info.rows, slot.fLm);
+        const aLm = slot.aLm ? sumSfField(info.rows, slot.aLm) : 0;
+        forecastOut += fLm * num(rate);
+        actualOut += aLm * num(rate);
+        if (!seen.has(pid)) {
+          seen.add(pid);
+          forecastLm += fLm;
+          actualLm += aLm;
+          forecastHires += sumSfField(info.rows, slot.fH);
+          if (slot.aH) actualHires += sumSfField(info.rows, slot.aH);
+        }
+      }
+    }
+    const variance = slot.role === "history" ? actualOut - forecastOut : null;
+    return {
+      date: slot.date || "",
+      key: String(slot.date || "").slice(0, 7),
+      role: slot.role,
+      forecastOut,
+      actualOut: slot.role === "history" ? actualOut : null,
+      variance,
+      variancePct: slot.role === "history" && forecastOut ? variance / forecastOut : null,
+      forecastLm,
+      actualLm: slot.role === "history" ? actualLm : null,
+      forecastHires,
+      actualHires: slot.role === "history" ? actualHires : null,
+    };
+  });
+}
+
+function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, monthCache, records) {
   const familyItems = items.filter((it) => String(it.Family || "") === familyName && String(it.InventoryCode || ""));
   const parts = familyItems.map((it) => computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache));
   const months = monthMeta.map((m, i) => {
@@ -453,6 +544,7 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
     orderQty,
     orderCost,
     months,
+    timeline: buildFamilyTimeline(familyItems, state, records || [], monthMeta, productIndex),
     peakMonth: peak,
     members,
   };
@@ -556,7 +648,7 @@ async function buildDemand(state, month, code) {
   const products = computed.products;
   const trajectory = computed.months;
   const peak = computed.peakMonth;
-  const familyDemand = buildFamilyDemand(items, state, item.family, monthMeta, productIndex, monthCache);
+  const familyDemand = buildFamilyDemand(items, state, item.family, monthMeta, productIndex, monthCache, records);
 
   const peakIdx = peak.index || 1;
   const companyMap = {};
@@ -582,7 +674,7 @@ async function buildDemand(state, month, code) {
         };
       }
       const hires = sfNum(rec, `Forecast Month${peakIdx}_NoOfHires`);
-      const outLm = sfNum(rec, `Forecast Month${peakIdx}_c_TotalLM`);
+      const outLm = sfForecastLm(rec, peakIdx);
       const netLm = sfNum(rec, `StockReturning Net Month ${peakIdx}_NetRequired`);
       const days = num(rec.CompanyProduct_cv_AvgDays);
       const qty = num(rec.CompanyProduct_cv_AvgQty);

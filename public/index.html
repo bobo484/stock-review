@@ -223,6 +223,13 @@ const TIPS = {
   detailsTab: "National ask grid — stock, surplus, proposed buy, and GM Decision.",
   demandTab: "Why this item is on the ask: forecast starts, POs, hire duration.",
   stocktakesTab: "Last FileMaker stocktake date versus the forecast cache date.",
+  timelineForecast: "Submitted forecast OUT for that month, in this family’s units (LM × each item’s qty/m, then summed).",
+  timelineActual: "Actual contracts that went on hire that month, in this family’s units. From FileMaker contract actuals on the Sales Forecast (count × avg LM).",
+  timelineVar: "Actual − forecast. Green means more went out than planned; red means the forecast was high.",
+  timelineForecastLm: "Submitted forecast lineal metres across hire products that use this family.",
+  timelineActualLm: "Actual lineal metres on hire that month.",
+  timelineForecastHires: "Forecast hire contract count.",
+  timelineActualHires: "Actual hire contract count.",
 };
 
 function tipAttr(text, title) {
@@ -749,6 +756,90 @@ function firmBlock(d) {
   `;
 }
 
+function familyTimelineChart(rows) {
+  const months = rows || [];
+  if (!months.length) return "";
+  const W = 760, H = 240;
+  const pad = { l: 56, r: 14, t: 18, b: 34 };
+  const innerW = W - pad.l - pad.r;
+  const innerH = H - pad.t - pad.b;
+  const vals = months.flatMap((m) => [m.forecastOut || 0, m.actualOut || 0]);
+  const max = Math.max(1, ...vals);
+  const y = (v) => pad.t + innerH - (Math.max(0, v) / max) * innerH;
+  const n = Math.max(1, months.length);
+  const gw = innerW / n;
+  const barW = Math.max(10, gw / 5);
+  let grid = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = max * (i / 4);
+    const yy = y(v);
+    grid += `<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" stroke="#2d3845"/>`;
+    grid += `<text x="${pad.l-6}" y="${yy+3}" text-anchor="end" fill="#8b98a5" font-size="10">${num(Math.round(v))}</text>`;
+  }
+  let bars = "";
+  months.forEach((m, i) => {
+    const cx = pad.l + i * gw + gw / 2;
+    const hist = m.role === "history";
+    if (hist) bars += `<rect x="${cx-gw/2+4}" y="${pad.t}" width="${gw-8}" height="${innerH}" fill="rgba(63,185,80,.06)"/>`;
+    const f = m.forecastOut || 0;
+    const a = m.actualOut || 0;
+    if (hist) {
+      bars += `<rect x="${cx-barW-2}" y="${y(f)}" width="${barW}" height="${Math.max(0, y(0)-y(f))}" fill="#4f9cf9" rx="2"/>`;
+      bars += `<rect x="${cx+2}" y="${y(a)}" width="${barW}" height="${Math.max(0, y(0)-y(a))}" fill="#3fb950" rx="2"/>`;
+    } else {
+      bars += `<rect x="${cx-barW/2}" y="${y(f)}" width="${barW}" height="${Math.max(0, y(0)-y(f))}" fill="#79b8ff" rx="2"/>`;
+    }
+    const label = (m.key || m.date || "").slice(0, 7) || ("M" + (i + 1));
+    bars += `<text x="${cx}" y="${H-12}" text-anchor="middle" fill="${hist?"#3fb950":"#8b98a5"}" font-size="11">${esc(label)}${hist?" · act":""}</text>`;
+  });
+  return `<div class="chart">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${bars}</svg>
+    <div class="legend">
+      <span${tipAttr(TIPS.timelineForecast, "Forecast")}><i class="sw" style="background:#4f9cf9"></i>Forecast (submitted)</span>
+      <span${tipAttr(TIPS.timelineActual, "Actual")}><i class="sw" style="background:#3fb950"></i>Actual (on hire)</span>
+      <span${tipAttr("Next four months from this Sales Forecast — no actuals yet.", "Forward forecast")}><i class="sw" style="background:#79b8ff"></i>Forward forecast</span>
+    </div>
+  </div>`;
+}
+
+function familyTimelineBlock(fam) {
+  const rows = fam.timeline || [];
+  if (!rows.length) return "";
+  return `
+    <h2>6-month timeline — actual vs forecast</h2>
+    <p class="muted">Last two months: FileMaker submitted forecast versus actual contracts on hire. Next four months: this Sales Forecast only. Units = LM × each item’s qty/m, then summed across ${esc(fam.name)}.</p>
+    ${familyTimelineChart(rows)}
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr>
+          ${thTip("Month", "History months are complete. Forward months are this forecast.", true)}
+          ${thTip("Type", "History = actual available. Forecast = forward look only.", true)}
+          ${thTip("Forecast units", TIPS.timelineForecast)}
+          ${thTip("Actual units", TIPS.timelineActual)}
+          ${thTip("Variance", TIPS.timelineVar)}
+          ${thTip("Forecast LM", TIPS.timelineForecastLm)}
+          ${thTip("Actual LM", TIPS.timelineActualLm)}
+          ${thTip("Forecast hires", TIPS.timelineForecastHires)}
+          ${thTip("Actual hires", TIPS.timelineActualHires)}
+        </tr></thead>
+        <tbody>${rows.map((m) => {
+          const hist = m.role === "history";
+          return `<tr class="${hist?"order":""}">
+            ${tdTip(esc(m.key || (m.date||"").slice(0,7)), "Calendar month on the Sales Forecast.", "", true)}
+            ${tdTip(hist ? "Actual + forecast" : "Forecast", hist ? "Completed month with actuals." : "Forward forecast month.", "", true)}
+            ${tdTip(num(Math.round(m.forecastOut || 0)), TIPS.timelineForecast)}
+            ${tdTip(hist ? num(Math.round(m.actualOut || 0)) : "—", TIPS.timelineActual)}
+            ${tdTip(hist ? signed(m.variance, 0) : "—", TIPS.timelineVar, hist ? cls(m.variance) : "")}
+            ${tdTip(num(Math.round(m.forecastLm || 0)), TIPS.timelineForecastLm)}
+            ${tdTip(hist ? num(Math.round(m.actualLm || 0)) : "—", TIPS.timelineActualLm)}
+            ${tdTip(num(Math.round(m.forecastHires || 0)), TIPS.timelineForecastHires)}
+            ${tdTip(hist ? num(Math.round(m.actualHires || 0)) : "—", TIPS.timelineActualHires)}
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
 function demandChart(months, refs) {
   const W = 760, H = 240;
   const pad = { l: 56, r: 14, t: 18, b: 34 };
@@ -894,7 +985,7 @@ function drawDemand() {
     <div class="cards">
       ${kpis.map(([label, val, klass, def]) => kpiCard(label, val, klass, def)).join("")}
     </div>
-    ${familyMode ? "" : firmBlock(d)}
+    ${familyMode ? familyTimelineBlock(fam) : firmBlock(d)}
     <h2>Demand over the forecast period</h2>
     <p class="muted">${familyMode ? "All items in " + esc(fam.name) : esc(it.code)} — starts, returning stock, net extra held, and projected in-service versus required / cover.${familyMode ? "" : " Cyan line is waiting customer POs timed to expected hire month."}</p>
     ${demandChart(months, refs)}
