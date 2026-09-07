@@ -97,12 +97,13 @@
 <header>
   <div>
     <h1>Stock Review</h1>
-    <div class="sub">Buy ask is the last forecast month only (Dec 2026 on a Sep 2026 file). Peak months are highlighted for ops / transfers — not a dollar ask. Decision is the GM override.</div>
+    <div class="sub" id="headerSub">Buy ask is the last forecast month only (Dec 2026 on a Sep 2026 file). Peak months are highlighted for ops / transfers — not a dollar ask. Decision is the GM override.</div>
   </div>
   <div class="row">
     <div class="seg" id="states"></div>
+    <div class="seg" id="askBasis" data-tip-title="Ask basis" data-tip="Buy month = last forecast month in-service (what you can still purchase). Peak month = peak-month projected in-service (often October — FileMaker-style, too late to buy)."></div>
     <select id="month"></select>
-    <button class="btn" id="onlyOrders" data-tip-title="Buy lines only" data-tip="Show only SKUs with a buy-month shortfall. Peak / too-late months are not in this list.">Buy lines only</button>
+    <button class="btn" id="onlyOrders" data-tip-title="Ask lines only" data-tip="Show only SKUs with a shortfall on the selected ask (buy month or peak month).">Ask lines only</button>
     <input type="search" id="q" placeholder="Search code or name" />
     <a class="btn primary" id="export" href="#" data-tip-title="Export Excel" data-tip="Download this state’s Details grid as an Excel file, including Decision values.">Export Excel</a>
   </div>
@@ -133,6 +134,7 @@ let state = "QLD";
 let month = "2026-09";
 let data = null;
 let family = "ALL";
+let askBasis = "buy";
 let onlyOrders = true;
 let q = "";
 let view = "details";
@@ -169,9 +171,85 @@ function fmtDay(v) {
 }
 const pct = (n) => n ? (n*100).toFixed(0)+"%" : "—";
 const cls = (n) => n < 0 ? "neg" : n > 0 ? "pos" : "";
-const buyQty = (r) => (r && (r.sysQty || 0)) || 0;
-const buyCost = (r) => (r && (r.sysCost || 0)) || 0;
-const onBuy = (r) => buyQty(r) > 0;
+function isPeakAsk() { return askBasis === "peak"; }
+function askQty(r) {
+  if (!r) return 0;
+  return isPeakAsk() ? (r.peakQty || 0) : (r.buyQty != null ? r.buyQty : r.sysQty || 0);
+}
+function askCost(r) {
+  if (!r) return 0;
+  return isPeakAsk() ? (r.peakCost || 0) : (r.buyCost != null ? r.buyCost : r.sysCost || 0);
+}
+function askSurplus(r) {
+  if (!r) return 0;
+  return isPeakAsk()
+    ? (r.peakSurplus != null ? r.peakSurplus : r.surplus || 0)
+    : (r.buySurplus != null ? r.buySurplus : r.surplus || 0);
+}
+function askQtyState(r, st) {
+  const s = (r && r.byState && r.byState[st]) || {};
+  return isPeakAsk() ? (s.peakQty || 0) : (s.buyQty != null ? s.buyQty : s.sysQty || 0);
+}
+function askCostState(r, st) {
+  const s = (r && r.byState && r.byState[st]) || {};
+  return isPeakAsk() ? (s.peakCost || 0) : (s.buyCost != null ? s.buyCost : s.sysCost || 0);
+}
+const buyQty = (r) => askQty(r);
+const buyCost = (r) => askCost(r);
+const onBuy = (r) => askQty(r) > 0;
+function askMonthKey(dataObj) {
+  const d = dataObj || data || {};
+  return isPeakAsk() ? (d.peakMonthKey || "") : (d.buyMonthKey || "");
+}
+function askNoun() { return isPeakAsk() ? "Peak" : "Buy"; }
+function exportHref() {
+  return `/api/export.xlsx?state=${state}&month=${month}&ask=${askBasis}`;
+}
+function summarizeAsk(src) {
+  const rows = (src && src.rows) || [];
+  const families = {};
+  for (const r of rows) {
+    const fam = r.family || "(blank)";
+    if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
+    families[fam].n += 1;
+    if (askQty(r) > 0) {
+      families[fam].orderLines += 1;
+      families[fam].orderCost += askCost(r);
+      families[fam].sysCost += askCost(r);
+    }
+    families[fam].decisionCost += r.decisionCost || 0;
+  }
+  const orderRows = rows.filter((r) => askQty(r) > 0);
+  const totals = {
+    ...(src.totals || {}),
+    orderLines: orderRows.length,
+    orderQty: orderRows.reduce((s, r) => s + askQty(r), 0),
+    orderCost: orderRows.reduce((s, r) => s + askCost(r), 0),
+    sysCost: orderRows.reduce((s, r) => s + askCost(r), 0),
+    shortfallLines: rows.filter((r) => askSurplus(r) < 0).length,
+  };
+  let byState = src.byState;
+  if (src.national && src.byState) {
+    byState = src.byState.map((s) => {
+      if (s.missing) return s;
+      const stRows = rows.filter((r) => r.byState && r.byState[s.state]);
+      const qty = stRows.reduce((sum, r) => sum + askQtyState(r, s.state), 0);
+      const cost = stRows.reduce((sum, r) => sum + askCostState(r, s.state), 0);
+      return {
+        ...s,
+        orderLines: stRows.filter((r) => askQtyState(r, s.state) > 0).length,
+        orderQty: qty,
+        orderCost: cost,
+        sysCost: cost,
+      };
+    });
+  }
+  return {
+    totals,
+    families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
+    byState,
+  };
+}
 function isPicked(code) {
   return pickedCodes.indexOf(code) >= 0;
 }
@@ -254,12 +332,12 @@ function rollupFamily(fam, codes) {
     return slice;
   });
   const peak = months.reduce((a, b) => ((b.outUnits || 0) > (a.outUnits || 0) ? b : a), months[0] || {});
-  const required = selected.reduce((s, m) => s + (m.required || 0), 0);
+  const required = selected.reduce((s, m) => s + (isPeakAsk() ? (m.peakRequired || 0) : (m.required || 0)), 0);
   const cover = selected.reduce((s, m) => s + (m.cover || 0), 0);
   return {
     ...fam,
     itemCount: selected.length,
-    orderLines: selected.filter((m) => m.orderQty > 0).length,
+    orderLines: selected.filter((m) => askQty(m) > 0).length,
     forecastMax: selected.reduce((s, m) => s + (m.forecastMax || 0), 0),
     required,
     cover,
@@ -267,8 +345,8 @@ function rollupFamily(fam, codes) {
     inService: selected.reduce((s, m) => s + (m.inService || 0), 0),
     totalStock: selected.reduce((s, m) => s + (m.totalStock || 0), 0),
     currentOrders: selected.reduce((s, m) => s + (m.currentOrders || 0), 0),
-    orderQty: selected.reduce((s, m) => s + (m.orderQty || 0), 0),
-    orderCost: selected.reduce((s, m) => s + (m.orderCost || 0), 0),
+    orderQty: selected.reduce((s, m) => s + askQty(m), 0),
+    orderCost: selected.reduce((s, m) => s + askCost(m), 0),
     months,
     peakMonth: peak,
     subset: true,
@@ -278,6 +356,7 @@ function rollupFamily(fam, codes) {
 
 const TIPS = {
   originalAsk: "Buy-month shortfall $: fleet needed for the last forecast month’s projected in-service, minus stock + on order. Peak-month shortfall is not in this number.",
+  peakAsk: "Peak-month shortfall $: fleet needed for peak-month projected in-service (strongest starts, often October), minus stock + on order. Usually too late to buy — compare with Buy month.",
   orderLines: "How many SKUs are short for the buy month (last forecast month), not the peak.",
   orderQtySum: "Total units of the buy-month shortfall.",
   shortfallSkus: "Items where stock + current orders is below what the buy-month in-service needs at target utilisation.",
@@ -363,7 +442,7 @@ const TIPS = {
   negCount: "On-hand or a branch SOH / IS below zero in StockCalculator. Yard counts that do not add up — check that branch.",
   negBranches: "Branches whose BranchStockJSON stock-on-hand or in-service is negative.",
   onAsk: "System-requested qty if this item has a shortfall.",
-  onlyOrders: "Show only SKUs with a system-requested shortfall. Turn off to see the whole fleet.",
+  onlyOrders: "Show only SKUs with a shortfall on the selected ask (buy month or peak month). Turn off to see the whole fleet.",
   detailsTab: "System-requested shortfall grid — stock, surplus, and GM Decision.",
   demandTab: "Why this item is on the ask: forecast starts, POs, hire duration.",
   stocktakesTab: "Last FileMaker stocktake date versus the forecast cache date.",
@@ -394,9 +473,10 @@ function thSort(label, key, def, left) {
 }
 function sortValue(r, key) {
   if (key.startsWith("sug:")) return (r.suggested || {})[key.slice(4)] || 0;
-  if (key.startsWith("st:")) return ((r.byState || {})[key.slice(3)] || {}).sysCost || 0;
-  if (key === "sysQty") return buyQty(r);
-  if (key === "sysCost") return buyCost(r);
+  if (key.startsWith("st:")) return askCostState(r, key.slice(3));
+  if (key === "sysQty") return askQty(r);
+  if (key === "sysCost") return askCost(r);
+  if (key === "surplus") return askSurplus(r);
   const v = r[key];
   if (v == null || v === "") return TEXT_SORT.has(key) ? "" : 0;
   return v;
@@ -486,6 +566,8 @@ function syncUrl(code) {
   u.searchParams.set("month", month);
   if (code) u.searchParams.set("code", code);
   else u.searchParams.delete("code");
+  if (askBasis === "peak") u.searchParams.set("ask", "peak");
+  else u.searchParams.delete("ask");
   history.replaceState(null, "", u.pathname + u.search);
 }
 
@@ -494,6 +576,11 @@ async function boot() {
   const startState = params.get("state");
   const startMonth = params.get("month");
   const startCode = params.get("code") || "";
+  const startAsk = params.get("ask") || "";
+  if (startAsk === "peak") askBasis = "peak";
+  else {
+    try { if (localStorage.getItem("stockReviewAsk") === "peak") askBasis = "peak"; } catch (e) {}
+  }
   const r = await fetch("/api/files");
   const j = await r.json();
   files = j.files || [];
@@ -541,7 +628,30 @@ function renderControls() {
   $("onlyOrders").className = "btn" + (onlyOrders ? " primary" : "");
   $("onlyOrders").onclick = () => { onlyOrders = !onlyOrders; $("onlyOrders").className = "btn" + (onlyOrders ? " primary" : ""); draw(); };
   $("q").oninput = () => { q = $("q").value.trim().toLowerCase(); draw(); };
-  $("export").href = `/api/export.xlsx?state=${state}&month=${month}`;
+  $("export").href = exportHref();
+  const askEl = $("askBasis");
+  if (askEl) {
+    askEl.innerHTML = `
+      <button data-ask="buy" class="${askBasis==="buy"?"on":""}">Buy month</button>
+      <button data-ask="peak" class="${askBasis==="peak"?"on":""}">Peak month</button>`;
+    askEl.onclick = (e) => {
+      const btn = e.target.closest("[data-ask]");
+      const next = btn && btn.dataset.ask;
+      if (!next || next === askBasis) return;
+      askBasis = next;
+      try { localStorage.setItem("stockReviewAsk", askBasis); } catch (err) {}
+      renderControls();
+      if (view === "demand" && demand) drawDemand();
+      else if (view === "stocktakes" && stocktakes) drawStocktakes();
+      else draw();
+    };
+  }
+  const sub = $("headerSub");
+  if (sub) {
+    sub.textContent = askBasis === "peak"
+      ? "Peak ask uses peak-month projected in-service (often October). That month is usually too late to buy — compare it with Buy month, which is the last forecast month you can still purchase for. Decision is the GM override."
+      : "Buy ask is the last forecast month only (Dec 2026 on a Sep 2026 file). Peak months are highlighted for ops / transfers — switch to Peak month to see that ask. Decision is the GM override.";
+  }
 }
 
 function nearestCalcMonth(st, want) {
@@ -595,7 +705,8 @@ function mergeNationalDetails(wantMonth, parts) {
         row = {
           code: r.code, name: r.name, family: r.family, landed: r.landed,
           onHand: 0, inService: 0, totalStock: 0, currentOrders: 0, surplus: 0,
-          orderQty: 0, orderCost: 0, sysQty: 0, sysCost: 0, decisionCost: 0, byState: {},
+          orderQty: 0, orderCost: 0, sysQty: 0, sysCost: 0, decisionCost: 0,
+          buyQty: 0, buyCost: 0, peakQty: 0, peakCost: 0, buySurplus: 0, peakSurplus: 0, byState: {},
         };
         merged.set(r.code, row);
       }
@@ -608,8 +719,18 @@ function mergeNationalDetails(wantMonth, parts) {
       row.orderCost += r.sysCost || 0;
       row.sysQty += r.sysQty || 0;
       row.sysCost += r.sysCost || 0;
+      row.buyQty += r.buyQty || 0;
+      row.buyCost += r.buyCost || 0;
+      row.peakQty += r.peakQty || 0;
+      row.peakCost += r.peakCost || 0;
+      row.buySurplus += r.buySurplus || 0;
+      row.peakSurplus += r.peakSurplus || 0;
       row.decisionCost += r.decisionCost || 0;
-      row.byState[st] = { orderQty: r.sysQty || 0, orderCost: r.sysCost || 0, sysQty: r.sysQty || 0, sysCost: r.sysCost || 0, surplus: r.surplus || 0 };
+      row.byState[st] = {
+        orderQty: r.sysQty || 0, orderCost: r.sysCost || 0, sysQty: r.sysQty || 0, sysCost: r.sysCost || 0, surplus: r.surplus || 0,
+        buyQty: r.buyQty || 0, buyCost: r.buyCost || 0, peakQty: r.peakQty || 0, peakCost: r.peakCost || 0,
+        buySurplus: r.buySurplus || 0, peakSurplus: r.peakSurplus || 0,
+      };
     }
   }
   const rows = [...merged.values()].sort((a, b) => a.code.localeCompare(b.code));
@@ -653,6 +774,8 @@ function mergeNationalDetails(wantMonth, parts) {
     },
     families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
     rows,
+    buyMonthKey: parts.map((p) => p.data && p.data.buyMonthKey).find(Boolean) || "",
+    peakMonthKey: parts.map((p) => p.data && p.data.peakMonthKey).find(Boolean) || "",
   };
 }
 
@@ -689,7 +812,7 @@ async function load() {
     data = j;
     family = "ALL";
     pickedCodes = [];
-    $("export").href = `/api/export.xlsx?state=${state}&month=${month}`;
+    $("export").href = exportHref();
     syncUrl(view === "demand" ? selectedCode : "");
     if (view === "stocktakes") await loadStocktakes();
     else draw();
@@ -732,6 +855,7 @@ function drawStocktakes() {
   const d = stocktakes;
   if (!d) return;
   const t = d.totals;
+  const onAskStale = (d.rows || []).filter((r) => (r.status === "stale" || r.status === "never") && askQty(r) > 0).length;
   $("banner").textContent =
     `${state} ${fmtMonth(month)} · forecast cache ${fmtDay(d.cacheDate) || "—"} · stocktake window ${d.staleDays} days` +
     (d.source ? ` · ${d.source}${d.importedAt ? " " + new Date(d.importedAt).toLocaleString("en-AU") : ""}` : "");
@@ -757,7 +881,7 @@ function drawStocktakes() {
   const tone = (s) => s === "stale" || s === "never" ? "neg" : s === "fresh" ? "pos" : "";
   $("view-stocktakes").innerHTML = `
     <div class="why">
-      <p>Stocktakes should be done <b>just before the forecast</b>. This flags items that, at cache date <b>${esc(fmtDay(d.cacheDate) || "—")}</b>, had no count in the last <b>${d.staleDays} days</b>. ${t.onAskStale ? `<span class="neg">${num(t.onAskStale)} of those are on this month’s ask.</span>` : ""} ${t.negative ? `<span class="neg">${num(t.negative)} items have a negative on-hand or branch count.</span>` : ""}</p>
+      <p>Stocktakes should be done <b>just before the forecast</b>. This flags items that, at cache date <b>${esc(fmtDay(d.cacheDate) || "—")}</b>, had no count in the last <b>${d.staleDays} days</b>. ${onAskStale ? `<span class="neg">${num(onAskStale)} of those are on this month’s ask.</span>` : ""} ${t.negative ? `<span class="neg">${num(t.negative)} items have a negative on-hand or branch count.</span>` : ""}</p>
       <p class="muted">${d.hasData
         ? "Dates are FileMaker LocationItem LastStocktake — not in StockCalculator or live ERP snapshots. Compared to the forecast cache date. Negative counts come from StockCalculator on-hand / branch SOH."
         : "LastStocktake is not in StockCalculator or the ERP snapshot, and no LocationItem CSV / FileMaker pull is loaded — so every row shows “No LastStocktake file”, not “never counted”. Import a Stocktake List CSV (ItemCode, LastStocktake, Branch) or use Pull from FileMaker. Negative on-hand / branch SOH still flags from the calculator."}</p>
@@ -765,7 +889,7 @@ function drawStocktakes() {
     <div class="cards">
       ${kpiCard("Stale / never", num(t.stale), "neg", TIPS.staleNever, "warn")}
       ${kpiCard("Never counted", num(t.never), t.never?"neg":"", TIPS.neverCounted)}
-      ${kpiCard("On the ask + stale", num(t.onAskStale), t.onAskStale?"neg":"", TIPS.onAskStale)}
+      ${kpiCard("On the ask + stale", num(onAskStale), onAskStale?"neg":"", TIPS.onAskStale)}
       ${kpiCard("Counted in window", num(t.fresh), "pos", TIPS.countedWindow, "good")}
       ${kpiCard("All items", num(t.items), "", TIPS.allItems)}
       ${kpiCard("With a date", num(t.withDate), "", TIPS.withDate)}
@@ -804,7 +928,7 @@ function drawStocktakes() {
             ${tdTip(r.oldestStocktake ? fmtDay(r.oldestStocktake) : "—", TIPS.oldestBranch)}
             ${tdTip(r.daysBeforeForecast==null?"—":num(r.daysBeforeForecast), TIPS.daysBefore, tone(r.status))}
             ${tdTip(esc(stockStatusLabel(r.status)), TIPS.stockStatus, tone(r.status), true)}
-            ${tdTip(r.orderQty?num(r.orderQty):"", TIPS.onAsk)}
+            ${tdTip(askQty(r)?num(askQty(r)):"", TIPS.onAsk)}
             ${tdTip(`<b>${num(r.totalStock)}</b>`, TIPS.totalStock, r.totalStock<0?"neg":"")}
             ${tdTip(num(r.onHand), TIPS.onHand, r.onHand<0?"neg":"")}
             ${tdTip(r.negative ? (r.negBranches||[]).map((b)=>esc(b.location)+" "+num(b.onHand)).join(", ") || "On hand" : "", TIPS.negBranches, r.negative?"neg":"", true)}
@@ -865,7 +989,9 @@ function visibleRows() {
 }
 
 function stateOrderTip(st) {
-  return "Buy-month shortfall $ for " + st + ". Peak / too-late months are excluded.";
+  return isPeakAsk()
+    ? "Peak-month shortfall $ for " + st + "."
+    : "Buy-month shortfall $ for " + st + ". Peak / too-late months are excluded.";
 }
 
 function draw() {
@@ -874,17 +1000,20 @@ function draw() {
     drawNational();
     return;
   }
-  const t = data.totals;
+  const viewAsk = summarizeAsk(data);
+  const t = viewAsk.totals;
+  const famList = viewAsk.families;
   const locked = data.orderSubmitted ? `Forecast Orders locked: ${data.orderSubmitted}` : "Forecast Orders not locked";
   $("banner").textContent =
-    `${data.file} · cache ${fmtDay(data.cacheDate) || "—"} · submitted ${fmtDay(data.forecastSubmitted) || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}`;
+    `${data.file} · cache ${fmtDay(data.cacheDate) || "—"} · submitted ${fmtDay(data.forecastSubmitted) || "—"} · ${locked} · updated ${new Date(data.modified).toLocaleString("en-AU")}` +
+    (isPeakAsk() ? " · peak-month ask" : " · buy-month ask");
   $("kpis").innerHTML = [
-    kpiCard("Buy ask " + fmtMonth(data.buyMonthKey || ""), aud(t.sysCost), "", TIPS.systemRequested),
-    kpiCard("Buy lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("Buy qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard(askNoun() + " ask " + fmtMonth(askMonthKey(data) || ""), aud(t.sysCost), "", isPeakAsk() ? TIPS.peakAsk : TIPS.systemRequested),
+    kpiCard(askNoun() + " lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard(askNoun() + " qty", num(t.orderQty), "", TIPS.orderQtySum),
     kpiCard("Decision so far", aud(t.decisionCost), "", TIPS.decisionSoFar),
   ].join("");
-  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
+  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...famList.filter(f => f.orderLines || f.sysCost)];
   $("families").innerHTML = fams.map(f =>
     `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.sysCost)}</button>`
   ).join("");
@@ -914,10 +1043,10 @@ function draw() {
       ${thSort("On Hand", "onHand", TIPS.onHand)}${thSort("In Service", "inService", TIPS.inService)}${thSort("Total Stock", "totalStock", TIPS.totalStock)}
       ${thSort("Util", "util", TIPS.util)}${thSort("Target", "targetUtil", TIPS.target)}${thSort("Current Orders", "currentOrders", TIPS.currentOrders)}
       ${thSort("Peak month", "peakMonthKey", TIPS.peakOps, true)}${thSort("Peak IS", "forecastMax", TIPS.forecastMax)}
-      ${thSort("Surplus", "surplus", TIPS.surplus)}${thSort("Buy qty", "sysQty", TIPS.systemQty)}
+      ${thSort("Surplus", "surplus", TIPS.surplus)}${thSort(askNoun() + " qty", "sysQty", TIPS.systemQty)}
       ${thSort(others[0] + " sug.", "sug:" + others[0], TIPS.otherSug)}${thSort(others[1] + " sug.", "sug:" + others[1], TIPS.otherSug)}${thSort(others[2] + " sug.", "sug:" + others[2], TIPS.otherSug)}
       ${thSort("Decision", "decision", TIPS.decision)}${thSort("Decision $", "decisionCost", TIPS.decisionCost)}
-      ${thSort("Buy $", "sysCost", TIPS.systemCost)}
+      ${thSort(askNoun() + " $", "sysCost", TIPS.systemCost)}
       ${thSort("Prop. surplus", "proposedSurplus", TIPS.propSurplus)}${thSort("Prop. util", "proposedUtil", TIPS.propUtil)}
     </tr></thead>
     <tbody>${rows.map(r => `
@@ -934,7 +1063,7 @@ function draw() {
         ${tdTip(num(r.currentOrders), TIPS.currentOrders)}
         ${tdTip(esc(fmtMonth(r.peakMonthKey)), TIPS.peakOps, "", true)}
         ${tdTip(r.forecastMax ? num(r.forecastMax) : "—", TIPS.forecastMax)}
-        ${tdTip(num(r.surplus), TIPS.surplus, cls(r.surplus))}
+        ${tdTip(num(askSurplus(r)), TIPS.surplus, cls(askSurplus(r)))}
         ${tdTip(buyQty(r)?num(buyQty(r)):"", TIPS.systemQty)}
         ${tdTip(r.suggested[others[0]]?num(r.suggested[others[0]]):"", TIPS.otherSug)}
         ${tdTip(r.suggested[others[1]]?num(r.suggested[others[1]]):"", TIPS.otherSug)}
@@ -974,8 +1103,8 @@ function draw() {
   });
   bindGridSort();
   $("totals").innerHTML = `<table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Buy lines", TIPS.orderLines)}${thTip("Buy ask", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
-    <tbody>${data.families.filter(f => f.orderLines || f.sysCost || f.decisionCost).map(f => `
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip(askNoun() + " lines", TIPS.orderLines)}${thTip(askNoun() + " ask", TIPS.systemRequested)}${thTip("Decision", TIPS.decisionSoFar)}</tr></thead>
+    <tbody>${famList.filter(f => f.orderLines || f.sysCost || f.decisionCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
         ${tdTip(num(f.orderLines), TIPS.orderLines)}
@@ -993,21 +1122,24 @@ function draw() {
 }
 
 function drawNational() {
-  const t = data.totals;
-  const used = (data.byState || []).filter((s) => s.file);
+  const viewAsk = summarizeAsk(data);
+  const t = viewAsk.totals;
+  const famList = viewAsk.families;
+  const byState = viewAsk.byState || data.byState || [];
+  const used = byState.filter((s) => s.file);
   const prior = used.filter((s) => !s.exact).map((s) => s.state + " " + fmtMonth(s.calcMonth));
   $("banner").textContent =
-    `National ${fmtMonth(data.month)} · buy-month ask ${used.map((s) => s.state).join(" + ") || "—"}` +
+    `National ${fmtMonth(data.month)} · ${isPeakAsk() ? "peak-month" : "buy-month"} ask ${used.map((s) => s.state).join(" + ") || "—"}` +
     (data.forecastSubmitted ? ` · SF submitted ${data.forecastSubmitted}` : "") +
     (prior.length ? ` · prior calculator ${prior.join(", ")}` : "") +
     (data.modified ? ` · updated ${new Date(data.modified).toLocaleString("en-AU")}` : "");
   $("kpis").innerHTML = [
-    kpiCard("Buy ask", aud(t.sysCost), "", TIPS.systemRequested),
-    kpiCard("Buy lines", num(t.orderLines), "", TIPS.orderLines),
-    kpiCard("Buy qty", num(t.orderQty), "", TIPS.orderQtySum),
-    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national buy-month total."),
+    kpiCard(askNoun() + " ask", aud(t.sysCost), "", isPeakAsk() ? TIPS.peakAsk : TIPS.systemRequested),
+    kpiCard(askNoun() + " lines", num(t.orderLines), "", TIPS.orderLines),
+    kpiCard(askNoun() + " qty", num(t.orderQty), "", TIPS.orderQtySum),
+    kpiCard("States", used.map((s) => s.state).join(" · ") || "—", "", "States included in this national total."),
   ].join("");
-  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...data.families.filter(f => f.orderLines || f.sysCost)];
+  const fams = [{family:"ALL", orderLines:t.orderLines, sysCost:t.sysCost}, ...famList.filter(f => f.orderLines || f.sysCost)];
   $("families").innerHTML = fams.map(f =>
     `<button class="chip ${f.family===family?"on":""}" data-f="${f.family}"${tipAttr(TIPS.familyChip, f.family==="ALL"?"All families":f.family)}>${f.family==="ALL"?"All families":f.family} · ${f.orderLines} · ${aud(f.sysCost)}</button>`
   ).join("");
@@ -1026,14 +1158,14 @@ function drawNational() {
       ${thSort("Item", "code", TIPS.item, true)}${thSort("Family", "family", TIPS.family, true)}
       ${thSort("Total Stock", "totalStock", TIPS.totalStock)}
       ${STATES.map((s) => thSort(s + " $", "st:" + s, stateOrderTip(s))).join("")}
-      ${thSort("Buy qty", "sysQty", TIPS.systemQty)}${thSort("Buy ask", "sysCost", TIPS.systemRequested)}
+      ${thSort(askNoun() + " qty", "sysQty", TIPS.systemQty)}${thSort(askNoun() + " ask", "sysCost", TIPS.systemRequested)}
     </tr></thead>
     <tbody>${rows.map(r => `
       <tr class="clickable ${onBuy(r)?"order":""}" data-code="${esc(r.code)}">
         ${tdTip(`<b>${esc(r.code)}</b><div class="muted name" title="${esc(r.name)}">${esc(clip(r.name, 15))}</div>`, TIPS.item, "", true)}
         ${tdTip(esc(r.family), TIPS.family, "", true)}
         ${tdTip(`<b>${num(r.totalStock)}</b>`, TIPS.totalStock)}
-        ${STATES.map((s) => tdTip((r.byState[s] && r.byState[s].sysCost) ? aud(r.byState[s].sysCost) : "", stateOrderTip(s))).join("")}
+        ${STATES.map((s) => tdTip(askCostState(r, s) ? aud(askCostState(r, s)) : "", stateOrderTip(s))).join("")}
         ${tdTip(buyQty(r)?num(buyQty(r)):"", TIPS.systemQty)}
         ${tdTip(buyCost(r)?aud(buyCost(r)):"", TIPS.systemRequested)}
       </tr>`).join("")}</tbody>
@@ -1043,8 +1175,8 @@ function drawNational() {
   });
   bindGridSort();
   $("totals").innerHTML = `
-    <h2>By state — buy-month ask</h2>
-    <p class="muted">Each state’s StockCalculator system requested for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
+    <h2>By state — ${isPeakAsk() ? "peak-month" : "buy-month"} ask</h2>
+    <p class="muted">Each state’s StockCalculator ${isPeakAsk() ? "peak-month" : "buy-month"} ask for this forecast month. If that month’s file is missing, the latest prior calculator is used and marked. This is not a GM Forecast Order.</p>
     <table>
       <thead><tr>
         ${thTip("State", "State included in the national total.", true)}
@@ -1052,9 +1184,9 @@ function drawNational() {
         ${thTip("Month", "Calculator month. Prior means that state has not filed a calculator for the selected month yet.")}
         ${thTip("Shortfall lines", TIPS.orderLines)}
         ${thTip("System qty", TIPS.orderQtySum)}
-        ${thTip("Buy ask", TIPS.systemRequested)}
+        ${thTip(askNoun() + " ask", TIPS.systemRequested)}
       </tr></thead>
-      <tbody>${(data.byState || []).map((s) => `
+      <tbody>${byState.map((s) => `
         <tr>
           ${tdTip(esc(s.state), "State included in the national total.", "", true)}
           ${tdTip(esc(s.file || "—"), "StockCalculator file.")}
@@ -1075,8 +1207,8 @@ function drawNational() {
     </table>
     <h2>By family</h2>
     <table>
-    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip("Buy lines", TIPS.orderLines)}${thTip("Buy ask", TIPS.systemRequested)}</tr></thead>
-    <tbody>${data.families.filter(f => f.orderLines || f.sysCost).map(f => `
+    <thead><tr>${thTip("Family", TIPS.family, true)}${thTip(askNoun() + " lines", TIPS.orderLines)}${thTip(askNoun() + " ask", TIPS.systemRequested)}</tr></thead>
+    <tbody>${famList.filter(f => f.orderLines || f.sysCost).map(f => `
       <tr>
         ${tdTip(esc(f.family), TIPS.family, "", true)}
         ${tdTip(num(f.orderLines), TIPS.orderLines)}
@@ -1320,7 +1452,7 @@ function inputsBlock() {
       <p><b>Qty / m</b> — StockCalculator QtyPerM for this item on each hire product.</p>
       <p><b>Waiting POs / Avg days to on hire</b> — live ERP contracts, last 12 months. Waiting = PO raised and HireDate still empty. Days to on hire = DateRaised → HireDate (or InstallDateCompleted). That is how long a PO sits before it starts, not how long the job stays out.</p>
       <p><b>Projected POs</b> — each builder’s raise rate (90-day if they raised 2+, else 12-month average), minus raises already booked this month, then shifted by that ERP lag. Only the last forecast month — and after-SF months still inside the 4-month lead — count for this buy. Nov 2026 is not a buy month.</p>
-      <p><b>Required / cover / buy ask</b> — Required = ceil(buy-month projected in-service ÷ target utilisation). Cover = total stock + current supplier orders. The dollar ask is max(0, required − cover). Peak in-service is highlighted for ops / interstate transfers and is not in the ask — those earlier months were already decided.</p>
+      <p><b>Required / cover / ask</b> — Required = ceil(selected month’s projected in-service ÷ target utilisation). Cover = total stock + current supplier orders. The dollar ask is max(0, required − cover). Use the Buy month / Peak month toggle in the header to switch the month. Peak is usually too late to buy.</p>
     </div>
   `;
 }
@@ -1607,8 +1739,8 @@ function familyMembersBlock(fam, it) {
       <table>
         <thead><tr>
           <th class="pick l"><input type="checkbox" id="pickAllFam" ${(fam.members||[]).length && (fam.members||[]).every((m)=>isPicked(m.code))?"checked":""} /></th>
-          ${thTip("Item", TIPS.item, true)}${thTip("Peak IS (ops)", TIPS.forecastMax)}${thTip("Buy required", TIPS.required)}${thTip("Cover", TIPS.cover)}
-          ${thTip("Buy shortfall", TIPS.shortfall)}${thTip("Buy qty", TIPS.proposedBuy)}${thTip("Buy $", TIPS.orderCost)}
+          ${thTip("Item", TIPS.item, true)}${thTip("Peak IS (ops)", TIPS.forecastMax)}${thTip(askNoun() + " required", TIPS.required)}${thTip("Cover", TIPS.cover)}
+          ${thTip(askNoun() + " shortfall", TIPS.shortfall)}${thTip(askNoun() + " qty", TIPS.proposedBuy)}${thTip(askNoun() + " $", TIPS.orderCost)}
           ${thTip("Peak OUT", TIPS.peakOut)}${thTip("Now IS", TIPS.nowInService)}${thTip("Total stock", TIPS.totalStock)}
         </tr></thead>
         <tbody>${(fam.members||[]).map(m => `
@@ -1616,11 +1748,11 @@ function familyMembersBlock(fam, it) {
             <td class="pick l"><input type="checkbox" class="pick-item" data-code="${esc(m.code)}" ${isPicked(m.code)?"checked":""} /></td>
             ${tdTip(`<b>${esc(m.code)}</b><div class="muted">${esc(clip(m.name,15))}</div>`, TIPS.item, "", true)}
             ${tdTip(num(m.forecastMax), TIPS.forecastMax)}
-            ${tdTip(num(m.required), TIPS.required)}
+            ${tdTip(num(isPeakAsk() ? (m.peakRequired || 0) : (m.required || 0)), TIPS.required)}
             ${tdTip(num(m.cover), TIPS.cover)}
-            ${tdTip(num(m.shortfall), TIPS.shortfall, cls(-m.shortfall))}
-            ${tdTip(m.orderQty?num(m.orderQty):"", TIPS.proposedBuy)}
-            ${tdTip(m.orderCost?aud(m.orderCost):"", TIPS.orderCost)}
+            ${tdTip(num(isPeakAsk() ? ((m.peakRequired || 0) - (m.cover || 0)) : m.shortfall), TIPS.shortfall, cls(-(isPeakAsk() ? ((m.peakRequired || 0) - (m.cover || 0)) : m.shortfall)))}
+            ${tdTip(askQty(m)?num(askQty(m)):"", TIPS.proposedBuy)}
+            ${tdTip(askCost(m)?aud(askCost(m)):"", TIPS.orderCost)}
             ${tdTip(num(Math.round(m.peakOut)), TIPS.peakOut)}
             ${tdTip(num(m.inService), TIPS.nowInService)}
             ${tdTip(`<b>${num(m.totalStock)}</b>`, TIPS.totalStock)}
@@ -1655,13 +1787,28 @@ function drawDemand() {
   const months = buyMode ? buyMonths : baseMonths;
   const tableMonths = familyMode ? baseMonths : buyMonths;
   const peakLabel = peak.date ? fmtMonth(peak.date) : `Month ${peak.index}`;
+  const famRequired = isPeakAsk() ? (viewFam.peakRequired != null ? viewFam.peakRequired : viewFam.required) : viewFam.required;
+  const famOrderQty = isPeakAsk() ? (viewFam.peakQty != null ? viewFam.peakQty : viewFam.orderQty) : viewFam.orderQty;
+  const famOrderCost = isPeakAsk() ? (viewFam.peakCost != null ? viewFam.peakCost : viewFam.orderCost) : viewFam.orderCost;
+  const famShortfall = isPeakAsk()
+    ? (viewFam.peakShortfall != null ? viewFam.peakShortfall : (famRequired || 0) - (viewFam.cover || 0))
+    : viewFam.shortfall;
+  const famLines = isPeakAsk()
+    ? (viewFam.members || []).filter((m) => askQty(m) > 0).length
+    : viewFam.orderLines;
+  const itemIs = isPeakAsk() ? (d.peakIs != null ? d.peakIs : it.peakIs) : d.buyIs;
+  const itemRequired = isPeakAsk() ? (it.peakRequired || 0) : d.required;
+  const itemQty = askQty(it);
+  const itemMonth = isPeakAsk()
+    ? (fmtMonth(it.peakMonthKey) !== "—" ? fmtMonth(it.peakMonthKey) : peakLabel)
+    : (fmtMonth(it.buyMonthKey) !== "—" ? fmtMonth(it.buyMonthKey) : "month 4");
   const why = nationalMode
     ? `${esc(nat.name || fam.name || "Family")} national view uses submitted Sales Forecast from ${(nat.statesUsed || []).join(", ") || "no states yet"} — not Forecast Orders. Peak submitted starts are ${num(Math.round(natPeakUnits))} family units${natPeakRow.key ? " in " + esc(fmtMonth(natPeakRow.key)) : ""}. System required from each state’s latest calculator is ${num(natTot.required || 0)}; stock + on order cover ${num(natTot.cover || 0)}, shortfall ${num(natTot.shortfall || 0)}.`
     : familyMode
-    ? `${esc(fam.name)} ${pickedMode ? "selected " + num(viewFam.itemCount) + " of " + num(fam.itemCount) : "is " + num(fam.itemCount)} items in ${esc(state)}. The buy ask uses last-forecast-month in-service, not the peak. Combined buy-month required is ${num(viewFam.required)}; stock + on order cover ${num(viewFam.cover)}; buy shortfall ${num(viewFam.shortfall)}. Buy ask is ${viewFam.orderQty ? num(viewFam.orderQty) + " units · " + aud(viewFam.orderCost) : "none"} (${num(viewFam.orderLines)} lines). Peak in-service ${num(viewFam.forecastMax)} is ops / transfers only.${pickedMode ? " Bars and cards are the ticked items only." : ""}`
-    : (it.orderQty > 0)
-      ? `${it.code} is on the buy ask for the last forecast month (${esc(fmtMonth(it.buyMonthKey) !== "—" ? fmtMonth(it.buyMonthKey) : "month 4")}), when projected in-service is ${num(Math.round(d.buyIs || 0))}. At ${pct(it.targetUtil)} you need ${num(d.required)} in the fleet. Cover is ${num(d.cover)}, so the buy is ${num(it.orderQty)}. Peak in-service ${num(it.forecastMax)} in ${esc(fmtMonth(it.peakMonthKey) !== "—" ? fmtMonth(it.peakMonthKey) : peakLabel)} is too late to buy — transfers or other ops.`
-      : `${it.code} has no buy-month shortfall. Last-forecast-month in-service ${num(Math.round(d.buyIs || 0))} at ${pct(it.targetUtil)} needs ${num(d.required)}; stock + current orders cover ${num(d.cover)}. Peak ${esc(fmtMonth(it.peakMonthKey) !== "—" ? fmtMonth(it.peakMonthKey) : peakLabel)} (${num(it.forecastMax)} IS) is ops only.`;
+    ? `${esc(fam.name)} ${pickedMode ? "selected " + num(viewFam.itemCount) + " of " + num(fam.itemCount) : "is " + num(fam.itemCount)} items in ${esc(state)}. The ${isPeakAsk() ? "peak-month" : "buy-month"} ask uses ${isPeakAsk() ? "peak-month" : "last-forecast-month"} in-service. Combined required is ${num(famRequired)}; stock + on order cover ${num(viewFam.cover)}; shortfall ${num(famShortfall)}. Ask is ${famOrderQty ? num(famOrderQty) + " units · " + aud(famOrderCost) : "none"} (${num(famLines)} lines).${pickedMode ? " Bars and cards are the ticked items only." : ""}`
+    : (itemQty > 0)
+      ? `${it.code} is on the ${isPeakAsk() ? "peak-month" : "buy-month"} ask for ${esc(itemMonth)}, when projected in-service is ${num(Math.round(itemIs || 0))}. At ${pct(it.targetUtil)} you need ${num(itemRequired)} in the fleet. Cover is ${num(d.cover)}, so the ask is ${num(itemQty)}.`
+      : `${it.code} has no ${isPeakAsk() ? "peak-month" : "buy-month"} shortfall. Projected in-service ${num(Math.round(itemIs || 0))} at ${pct(it.targetUtil)} needs ${num(itemRequired)}; stock + current orders cover ${num(d.cover)}.`;
   const peakWhy = !nationalMode && peak.outUnits
     ? ` Strongest new-site demand is ${peakLabel}: ${num(Math.round(peak.outUnits))} units going to site, ${num(Math.round(peak.inUnits || 0))} returning, net ${num(Math.round(peak.netUnits || 0))}. That month is too late for this buy — use interstate transfers or other ops, not dollars.`
     : "";
@@ -1681,22 +1828,22 @@ function drawDemand() {
     : familyMode
     ? [
         ["Peak IS (ops)", num(viewFam.forecastMax), "", TIPS.forecastMax],
-        ["Buy required", num(viewFam.required), "", TIPS.required],
+        [askNoun() + " required", num(famRequired), "", TIPS.required],
         ["Total + on order", num(viewFam.cover), "", TIPS.cover],
-        ["Buy shortfall", num(viewFam.shortfall), cls(-viewFam.shortfall), TIPS.shortfall],
-        ["Buy qty", viewFam.orderQty ? num(viewFam.orderQty) : "—", "", TIPS.proposedBuy],
+        [askNoun() + " shortfall", num(famShortfall), cls(-famShortfall), TIPS.shortfall],
+        [askNoun() + " qty", famOrderQty ? num(famOrderQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(viewFam.inService), "", TIPS.nowInService],
       ]
     : [
         ["Peak IS (ops)", num(it.forecastMax), "", TIPS.forecastMax],
-        ["Buy month IS", num(Math.round(d.buyIs || 0)), "", "Projected in-service in the last forecast month — the only month this buy can serve."],
-        ["Buy required", num(d.required), "", TIPS.required],
+        [isPeakAsk() ? "Peak month IS" : "Buy month IS", num(Math.round(itemIs || 0)), "", isPeakAsk() ? "Projected in-service in the peak-starts month." : "Projected in-service in the last forecast month — the only month this buy can serve."],
+        [askNoun() + " required", num(itemRequired), "", TIPS.required],
         ["Total + on order", num(d.cover), "", TIPS.cover],
-        ["Buy qty", it.orderQty ? num(it.orderQty) : "—", "", TIPS.proposedBuy],
+        [askNoun() + " qty", itemQty ? num(itemQty) : "—", "", TIPS.proposedBuy],
         ["Now in service", num(it.inService), "", TIPS.nowInService],
       ];
   const refs = {
-    required: familyMode ? viewFam.required : d.required,
+    required: familyMode ? famRequired : itemRequired,
     forecastMax: familyMode ? viewFam.forecastMax : it.forecastMax,
     cover: familyMode ? viewFam.cover : d.cover,
     peakIndex: peak.index,

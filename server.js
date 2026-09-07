@@ -26,21 +26,48 @@ function fleetNeed(inService, targetUtil) {
   return Math.ceil(need);
 }
 
-function applyBuyAsk(row, buyIs) {
-  const cover = (row.totalStock || 0) + (row.currentOrders || 0);
-  const required = fleetNeed(buyIs, row.targetUtil);
+function calcAsk(cover, inService, targetUtil, landed) {
+  const required = fleetNeed(inService, targetUtil);
   const surplus = cover - required;
   const qty = Math.max(0, Math.round(-surplus));
-  row.buyIs = buyIs;
-  row.required = required;
+  return {
+    inService,
+    required,
+    cover,
+    surplus,
+    shortfall: required - cover,
+    qty,
+    cost: qty * (landed || 0),
+  };
+}
+
+function applyAskFields(row, buyIs, peakIs) {
+  const cover = (row.totalStock || 0) + (row.currentOrders || 0);
+  const buy = calcAsk(cover, buyIs, row.targetUtil, row.landed);
+  const peak = calcAsk(cover, peakIs, row.targetUtil, row.landed);
   row.cover = cover;
-  row.surplus = surplus;
-  row.shortfall = required - cover;
-  row.sysQty = qty;
-  row.sysCost = qty * (row.landed || 0);
-  row.orderQty = qty;
-  row.orderCost = row.sysCost;
-  row.opsGap = Math.max(0, fleetNeed(row.forecastMax, row.targetUtil) - cover);
+  row.buyIs = buy.inService;
+  row.buyRequired = buy.required;
+  row.buySurplus = buy.surplus;
+  row.buyQty = buy.qty;
+  row.buyCost = buy.cost;
+  row.peakIs = peak.inService;
+  row.peakRequired = peak.required;
+  row.peakSurplus = peak.surplus;
+  row.peakQty = peak.qty;
+  row.peakCost = peak.cost;
+  row.opsGap = peak.qty;
+  row.required = buy.required;
+  row.surplus = buy.surplus;
+  row.shortfall = buy.shortfall;
+  row.sysQty = buy.qty;
+  row.sysCost = buy.cost;
+  row.orderQty = buy.qty;
+  row.orderCost = buy.cost;
+}
+
+function applyBuyAsk(row, buyIs) {
+  applyAskFields(row, buyIs, row.forecastMax || buyIs);
 }
 
 function num(v) {
@@ -437,7 +464,8 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
   const peak = trajectory.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), trajectory[0] || { index: 1, outUnits: 0 });
   const buyMonth = trajectory.find((m) => m.index === BUY_INDEX) || trajectory[trajectory.length - 1];
   const buyIs = buyMonth ? buyMonth.projectedInService : item.inService;
-  applyBuyAsk(item, buyIs);
+  const peakIs = peak && peak.projectedInService != null ? peak.projectedInService : item.forecastMax;
+  applyAskFields(item, buyIs, peakIs);
   item.peakMonthKey = peak.date ? String(peak.date).slice(0, 7) : "";
   item.buyMonthKey = buyMonth && buyMonth.date ? String(buyMonth.date).slice(0, 7) : "";
   return {
@@ -447,6 +475,7 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
     peakMonth: peak,
     buyMonth,
     buyIs,
+    peakIs,
     required: item.required,
     cover: item.cover,
     shortfall: item.shortfall,
@@ -731,6 +760,9 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
   const currentOrders = parts.reduce((s, p) => s + p.item.currentOrders, 0);
   const orderQty = parts.reduce((s, p) => s + p.item.orderQty, 0);
   const orderCost = parts.reduce((s, p) => s + p.item.orderCost, 0);
+  const peakRequired = parts.reduce((s, p) => s + (p.item.peakRequired || 0), 0);
+  const peakQty = parts.reduce((s, p) => s + (p.item.peakQty || 0), 0);
+  const peakCost = parts.reduce((s, p) => s + (p.item.peakCost || 0), 0);
   const members = parts
     .map((p) => ({
       code: p.item.code,
@@ -747,6 +779,13 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
       peakMonthKey: p.item.peakMonthKey || "",
       buyIs: p.buyIs || 0,
       buyMonthKey: p.item.buyMonthKey || "",
+      buyRequired: p.item.buyRequired || p.required,
+      buyQty: p.item.buyQty || p.item.orderQty,
+      buyCost: p.item.buyCost || p.item.orderCost,
+      peakIs: p.peakIs || p.item.peakIs || 0,
+      peakRequired: p.item.peakRequired || 0,
+      peakQty: p.item.peakQty || 0,
+      peakCost: p.item.peakCost || 0,
       months: (p.months || []).map((m) => ({
         index: m.index,
         date: m.date,
@@ -771,6 +810,10 @@ function buildFamilyDemand(items, state, familyName, monthMeta, productIndex, mo
     currentOrders,
     orderQty,
     orderCost,
+    peakRequired,
+    peakQty,
+    peakCost,
+    peakShortfall: peakRequired - cover,
     months,
     timeline: buildFamilyTimeline(familyItems, state, records || [], monthMeta, productIndex),
     peakMonth: peak,
@@ -1054,6 +1097,7 @@ async function buildDemand(state, month, code) {
       "The dollar ask uses projected in-service in the last forecast month (the buy month), not the peak. Peak starts are highlighted for ops / interstate transfers — too late to buy. Units ≈ forecast LM × this item's Qty per metre.",
     buyMonth: computed.buyMonth,
     buyIs: computed.buyIs,
+    peakIs: computed.peakIs,
   };
 }
 
@@ -1072,10 +1116,10 @@ function attachBuyWindowAsks(state, month, items, rows) {
       const computed = computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache);
       row.peakMonthKey = computed.item.peakMonthKey || "";
       row.buyMonthKey = computed.item.buyMonthKey || buyKey;
-      applyBuyAsk(row, computed.buyIs);
+      applyAskFields(row, computed.buyIs, computed.peakIs != null ? computed.peakIs : row.forecastMax);
     }
   } catch {
-    for (const row of rows || []) applyBuyAsk(row, row.forecastMax);
+    for (const row of rows || []) applyAskFields(row, row.forecastMax, row.forecastMax);
   }
   return buyKey;
 }
@@ -1129,7 +1173,74 @@ function buildDetails(state, month) {
     families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
     rows,
     buyMonthKey,
+    peakMonthKey: commonMonthKey(rows, "peakMonthKey"),
     askBasis: "buy-month",
+  };
+}
+
+function commonMonthKey(rows, field) {
+  const counts = {};
+  for (const r of rows || []) {
+    const key = r[field];
+    if (key) counts[key] = (counts[key] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0]))[0]?.[0] || "";
+}
+
+function rowAskSlice(r, basis) {
+  const peak = basis === "peak";
+  const qty = peak ? (r.peakQty || 0) : (r.buyQty != null ? r.buyQty : r.sysQty || 0);
+  const cost = peak ? (r.peakCost || 0) : (r.buyCost != null ? r.buyCost : r.sysCost || 0);
+  const surplus = peak
+    ? (r.peakSurplus != null ? r.peakSurplus : r.surplus)
+    : (r.buySurplus != null ? r.buySurplus : r.surplus);
+  const byState = {};
+  for (const [st, s] of Object.entries(r.byState || {})) {
+    const stQty = peak ? (s.peakQty || 0) : (s.buyQty != null ? s.buyQty : s.sysQty || 0);
+    const stCost = peak ? (s.peakCost || 0) : (s.buyCost != null ? s.buyCost : s.sysCost || 0);
+    byState[st] = { ...s, sysQty: stQty, sysCost: stCost, orderQty: stQty, orderCost: stCost };
+  }
+  return { ...r, sysQty: qty, sysCost: cost, orderQty: qty, orderCost: cost, surplus, byState };
+}
+
+function applyAskBasis(data, basis) {
+  const peak = String(basis || "").toLowerCase() === "peak";
+  const mode = peak ? "peak" : "buy";
+  const rows = (data.rows || []).map((r) => rowAskSlice(r, mode));
+  const orderRows = rows.filter((r) => r.sysQty > 0);
+  const families = {};
+  for (const r of rows) {
+    const fam = r.family || "(blank)";
+    if (!families[fam]) families[fam] = { family: fam, n: 0, orderLines: 0, orderCost: 0, sysCost: 0, decisionCost: 0 };
+    families[fam].n += 1;
+    if (r.sysQty > 0) {
+      families[fam].orderLines += 1;
+      families[fam].orderCost += r.sysCost;
+      families[fam].sysCost += r.sysCost;
+    }
+    families[fam].decisionCost += r.decisionCost || 0;
+  }
+  const byState = (data.byState || []).map((s) => {
+    if (s.missing) return s;
+    const stRows = rows.filter((r) => r.byState && r.byState[s.state]);
+    const qty = stRows.reduce((sum, r) => sum + ((r.byState[s.state] || {}).sysQty || 0), 0);
+    const cost = stRows.reduce((sum, r) => sum + ((r.byState[s.state] || {}).sysCost || 0), 0);
+    const lines = stRows.filter((r) => ((r.byState[s.state] || {}).sysQty || 0) > 0).length;
+    return { ...s, orderLines: lines, orderQty: qty, orderCost: cost, sysCost: cost };
+  });
+  return {
+    ...data,
+    askBasis: peak ? "peak-month" : "buy-month",
+    rows,
+    byState: data.byState ? byState : data.byState,
+    families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
+    totals: {
+      ...data.totals,
+      orderLines: orderRows.length,
+      orderQty: orderRows.reduce((s, r) => s + r.sysQty, 0),
+      orderCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
+      sysCost: orderRows.reduce((s, r) => s + r.sysCost, 0),
+    },
   };
 }
 
@@ -1185,6 +1296,8 @@ function buildNationalDetails(month) {
       sysCost: d.totals.sysCost,
       decisionCost: d.totals.decisionCost,
       shortfallLines: d.totals.shortfallLines,
+      buyMonthKey: d.buyMonthKey || "",
+      peakMonthKey: d.peakMonthKey || "",
     });
     for (const r of d.rows) {
       let row = merged.get(r.code);
@@ -1203,6 +1316,12 @@ function buildNationalDetails(month) {
           orderCost: 0,
           sysQty: 0,
           sysCost: 0,
+          buyQty: 0,
+          buyCost: 0,
+          peakQty: 0,
+          peakCost: 0,
+          buySurplus: 0,
+          peakSurplus: 0,
           decisionCost: 0,
           byState: {},
         };
@@ -1217,6 +1336,12 @@ function buildNationalDetails(month) {
       row.orderCost += r.orderCost || 0;
       row.sysQty += r.sysQty || 0;
       row.sysCost += r.sysCost || 0;
+      row.buyQty += r.buyQty || 0;
+      row.buyCost += r.buyCost || 0;
+      row.peakQty += r.peakQty || 0;
+      row.peakCost += r.peakCost || 0;
+      row.buySurplus += r.buySurplus || 0;
+      row.peakSurplus += r.peakSurplus || 0;
       row.decisionCost += r.decisionCost || 0;
       row.byState[st] = {
         orderQty: r.sysQty || 0,
@@ -1224,6 +1349,12 @@ function buildNationalDetails(month) {
         sysQty: r.sysQty || 0,
         sysCost: r.sysCost || 0,
         surplus: r.surplus || 0,
+        buyQty: r.buyQty || 0,
+        buyCost: r.buyCost || 0,
+        peakQty: r.peakQty || 0,
+        peakCost: r.peakCost || 0,
+        buySurplus: r.buySurplus || 0,
+        peakSurplus: r.peakSurplus || 0,
       };
     }
   }
@@ -1270,6 +1401,8 @@ function buildNationalDetails(month) {
     },
     families: Object.values(families).sort((a, b) => b.orderCost - a.orderCost),
     rows,
+    buyMonthKey: byState.map((s) => s.buyMonthKey).find(Boolean) || "",
+    peakMonthKey: byState.map((s) => s.peakMonthKey).find(Boolean) || "",
   };
 }
 
@@ -1678,6 +1811,8 @@ function buildStocktakes(state, month, staleDays) {
       inService: r.inService,
       totalStock: r.totalStock,
       orderQty: r.orderQty,
+      buyQty: r.buyQty,
+      peakQty: r.peakQty,
       lastStocktake: isoDay(last),
       oldestStocktake: isoDay(oldest),
       daysBeforeForecast: daysBefore,
@@ -1866,11 +2001,16 @@ app.get("/api/export.xlsx", async (req, res) => {
   try {
     const state = String(req.query.state || "QLD").toUpperCase();
     const month = String(req.query.month || "");
+    const ask = String(req.query.ask || "buy").toLowerCase() === "peak" ? "peak" : "buy";
     if (state === "NAT" || state === "NATIONAL") {
-      const data = buildNationalDetails(month);
+      const data = applyAskBasis(buildNationalDetails(month), ask);
       const wb = new ExcelJS.Workbook();
       const by = wb.addWorksheet("BY STATE");
-      by.addRow(["Buy ask is last-forecast-month in-service only. Peak / too-late months are excluded."]);
+      by.addRow([
+        ask === "peak"
+          ? "Peak-month ask: fleet needed for peak-month projected in-service, minus stock + on order."
+          : "Buy ask is last-forecast-month in-service only. Peak / too-late months are excluded.",
+      ]);
       by.addRow(["State", "Calculator", "Month", "Exact month", "Lines", "System qty", "System requested"]);
       for (const s of data.byState) {
         by.addRow([s.state, s.file || "—", s.calcMonth || "—", s.exact ? "Yes" : "Prior file", s.orderLines, s.orderQty, s.sysCost]);
@@ -1902,7 +2042,7 @@ app.get("/api/export.xlsx", async (req, res) => {
       res.end();
       return;
     }
-    const data = buildDetails(state, month);
+    const data = applyAskBasis(buildDetails(state, month), ask);
     const others = STATES.filter((s) => s !== state);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("DETAILS");
