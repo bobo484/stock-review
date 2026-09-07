@@ -72,6 +72,9 @@
   .totals{margin-top:16px;overflow:auto}
   .totals table{min-width:520px}
   .split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .duration-tables table{min-width:820px}
+  .duration-tables tfoot td{font-weight:650;background:var(--panel2);border-top:1px solid var(--border)}
+  .duration-net{margin:8px 0 0;font-size:12px;line-height:1.45}
   @media (max-width:900px){.split{grid-template-columns:1fr}}
   .card.warn{border-color:rgba(248,81,73,.45);background:rgba(248,81,73,.08)}
   .card.good{border-color:rgba(63,185,80,.45);background:rgba(63,185,80,.08)}
@@ -101,7 +104,7 @@
   </div>
   <div class="row">
     <div class="seg" id="states"></div>
-    <div class="seg" id="askBasis" data-tip-title="Ask basis" data-tip="Buy month = last forecast month in-service (what you can still purchase). Peak month = peak-month projected in-service (often October — FileMaker-style, too late to buy)."></div>
+    <div class="seg" id="askBasis" data-tip-title="Ask basis" data-tip="Buy month = last forecast month in-service (what you can still purchase). Peak month = FileMaker Peak IS / Forecast Max (often October — too late to buy). Surplus and qty follow this toggle."></div>
     <select id="month"></select>
     <button class="btn" id="onlyOrders" data-tip-title="Ask lines only" data-tip="Show only SKUs with a shortfall on the selected ask (buy month or peak month).">Ask lines only</button>
     <input type="search" id="q" placeholder="Search code or name" />
@@ -356,7 +359,7 @@ function rollupFamily(fam, codes) {
 
 const TIPS = {
   originalAsk: "Buy-month shortfall $: fleet needed for the last forecast month’s projected in-service, minus stock + on order. Peak-month shortfall is not in this number.",
-  peakAsk: "Peak-month shortfall $: fleet needed for peak-month projected in-service (strongest starts, often October), minus stock + on order. Usually too late to buy — compare with Buy month.",
+  peakAsk: "Peak-month shortfall $: fleet needed for FileMaker Peak IS (Forecast Max), minus stock + on order. Same basis as Forecast Orders. Usually too late to buy — compare with Buy month.",
   orderLines: "How many SKUs are short for the buy month (last forecast month), not the peak.",
   orderQtySum: "Total units of the buy-month shortfall.",
   shortfallSkus: "Items where stock + current orders is below what the buy-month in-service needs at target utilisation.",
@@ -373,7 +376,7 @@ const TIPS = {
   util: "In service ÷ total stock. How much of the fleet is out.",
   target: "FileMaker target utilisation. Buy required = ceil(buy-month projected in-service ÷ this target). Peak in-service is not used for the ask.",
   currentOrders: "Units already on order from suppliers, not yet in the fleet.",
-  surplus: "Stock + current orders − buy-month required. Negative is the dollar ask. Peak shortfall is not included.",
+  surplus: "Stock + current orders − required for the selected ask (Buy month or Peak IS). Negative is the shortfall / dollar ask.",
   orderQty: "Buy-month shortfall qty: max(0, required for last-forecast-month in-service − cover).",
   otherSug: "That other state’s FileMaker suggested buy for the same item — so you can see if they are already covering it.",
   decision: "Type the qty you actually want to buy. This is the GM override of the buy-month shortfall.",
@@ -398,7 +401,7 @@ const TIPS = {
   weightedDays: "Customer-weighted hire duration on this item now (large clients move the number more).",
   priorWeighted: "Same weighted hire duration in the previous Sales Forecast month.",
   daysChange: "Change in weighted hire days versus last forecast. Longer means stock stays out and less comes back to install again.",
-  extraHeld: "Extra units held (or released) because duration changed: peak starts × change in days ÷ working days.",
+  extraHeld: "Item-wide extra units held (or released): peak starts × weighted day change ÷ working days. The table footers sum every builder that moved, not only the top 8 rows.",
   outStarts: "Forecast site starts that month, in this item’s units (LM × qty/m).",
   inReturning: "FileMaker StockReturning: return window (start/end, shifted by blackout, using CompanyAvgDays) → calculated returning LM, not each contract’s planned off-hire date. IN = OUT − NET. Hidden when NET was left at 0 on an override-only month.",
   inUnfiled: "Sales Forecast did not file returning for this month. OUT is from TotalLM Override; Submitted, TotalLM and UsingAve are 0, and NetRequired is 0. IN is not copied from OUT.",
@@ -415,7 +418,7 @@ const TIPS = {
   qtyM: "How many of this item are used per lineal metre on that hire product.",
   priorRate: "Qty per metre on last month’s calculator.",
   rateChange: "Change in qty/m versus last month. Up means more of this item per job.",
-  daysNow: "FileMaker CompanyProduct_cv_AvgDays — historical hire duration on that company × product × state from Contracts. Not the last-two-months actuals (those are MonthMinus1/2 qty fields) and not planned off-hire date.",
+  daysNow: "FileMaker cv_AvgDays — average duration of CLOSED contracts in the last 3 months (DateClosed, not hire date), this builder × product × state. Weeks × 7. If none, FileMaker uses other builders on the same product. Not last-two-months actuals and not planned off-hire.",
   daysWas: "Same cv_AvgDays from last month’s Sales Forecast file.",
   deltaDays: "Change in hire days. Red / longer increases the ask.",
   peakOutUnits: "This item’s units on that product in the peak month.",
@@ -426,9 +429,12 @@ const TIPS = {
   waiting: "POs raised but not yet on hire — contracted starts still in the pipeline.",
   firmUnits: "Waiting POs × this builder’s avg LM/hire × this item’s qty/m.",
   avgDaysHire: "ERP: average days from DateRaised to HireDate (or InstallDateCompleted), last 12 months. PO-to-on-hire lag, not how long the job stays out.",
-  avgLm: "FileMaker CompanyProduct_cv_AvgQty — historical average LM per hire, weighted by that builder’s peak-month forecast LM.",
+  avgLm: "FileMaker cv_AvgQty — average hire size from CLOSED hire lines in the last 3 months (DateClosed), this builder × product × state. AvgLM converts M² ÷ 4; scaffold drops lines ≤7.5; temp stairs = 1. If none, other builders on the same product. Weighted here by peak-month forecast LM. Not qty/m.",
   thisItemUnits: "This builder’s peak-month OUT for this item (LM × qty/m).",
-  extraHeldRow: "Extra units of this item held because this customer × product lengthened (or released if shortened).",
+  extraHeldRow: "Extra units of this item held because this customer × product lengthened (or released if shortened): peak units × Δ days ÷ prior days.",
+  durationFoot: "All builders that moved on this side, not only the top 8 shown. Δ days is weighted by peak units. Extra held is the ask impact from those duration changes.",
+  peakHiresRow: "Forecast hire contracts for this builder × product in the peak-starts month.",
+  peakLmRow: "Forecast lineal metres for this builder × product in the peak-starts month. Peak units = these metres × this item’s qty/m.",
   staleNever: "Items with no stocktake in the flag window, or never counted, as at the forecast cache date.",
   neverCounted: "Items with no LastStocktake date in FileMaker.",
   onAskStale: "Items that are on this month’s buy ask and also stale or never counted.",
@@ -1336,19 +1342,45 @@ function durationBlock(d) {
         ${tdTip(daysf(m.priorDays), TIPS.daysWas)}
         ${tdTip(daysf(m.days), TIPS.daysNow)}
         ${tdTip(signed(m.delta, 0), TIPS.deltaDays, m.delta>0?"neg":"pos")}
+        ${tdTip(m.hires ? num(Math.round(m.hires)) : "—", TIPS.peakHiresRow)}
+        ${tdTip(m.outLm ? num(Math.round(m.outLm)) : "—", TIPS.peakLmRow)}
         ${tdTip(num(Math.round(m.units)), TIPS.thisItemUnits)}
         ${tdTip(signed(m.extraUnits, 0), TIPS.extraHeldRow, m.extraUnits>0?"neg":"pos")}
       </tr>`).join("")
-    : `<tr><td class="l muted" colspan="7">None over 1 day</td></tr>`;
+    : `<tr><td class="l muted" colspan="9">None over 1 day</td></tr>`;
+  const moverFoot = (s) => {
+    if (!s || !s.n) return "";
+    return `<tfoot><tr>
+        ${tdTip(`<b>All ${num(s.n)} builders</b>`, TIPS.durationFoot, "", true)}
+        ${tdTip("weighted", TIPS.durationFoot, "muted", true)}
+        <td></td><td></td>
+        ${tdTip(signed(s.delta, 1), TIPS.durationFoot, s.delta>0?"neg":s.delta<0?"pos":"")}
+        ${tdTip(num(Math.round(s.hires || 0)), TIPS.durationFoot)}
+        ${tdTip(num(Math.round(s.outLm || 0)), TIPS.durationFoot)}
+        ${tdTip(num(Math.round(s.units || 0)), TIPS.durationFoot)}
+        ${tdTip(signed(s.extraUnits, 0), TIPS.durationFoot, s.extraUnits>0?"neg":s.extraUnits<0?"pos":"")}
+      </tr></tfoot>`;
+  };
   const moverHead = `<thead><tr>
     ${thTip("Customer", "Builder whose hire duration moved.", true)}
     ${thTip("Product", "Hire product this duration is measured on.", true)}
     ${thTip("Was", TIPS.daysWas)}${thTip("Now", TIPS.daysNow)}
-    ${thTip("Δ days", TIPS.deltaDays)}${thTip("Peak units", TIPS.thisItemUnits)}${thTip("Extra held", TIPS.extraHeldRow)}
+    ${thTip("Δ days", TIPS.deltaDays)}
+    ${thTip("Peak contracts", TIPS.peakHiresRow)}
+    ${thTip("Peak metres", TIPS.peakLmRow)}
+    ${thTip("Peak units", TIPS.thisItemUnits)}${thTip("Extra held", TIPS.extraHeldRow)}
   </tr></thead>`;
+  const longS = dur.longerAll || {};
+  const shortS = dur.shorterAll || {};
+  const netExtra = (longS.extraUnits || 0) + (shortS.extraUnits || 0);
+  const netLine = (longS.n || shortS.n)
+    ? `<p class="muted duration-net">${longS.n ? `Lengthening: <b>${num(longS.n)}</b> builders, weighted ${signed(longS.delta, 1)} days, <span class="neg">${signed(longS.extraUnits, 0)}</span> extra units on the ask.` : "No builders lengthened."}
+       ${shortS.n ? `Shortening: <b>${num(shortS.n)}</b> builders, weighted ${signed(shortS.delta, 1)} days, <span class="pos">${signed(shortS.extraUnits, 0)}</span> units released.` : "No builders shortened."}
+       Net from these duration moves: <b class="${netExtra>0?"neg":netExtra<0?"pos":""}">${signed(netExtra, 0)}</b> units ${netExtra>0?"added to":netExtra<0?"taken off":"on"} the ask. The cards above use the item-wide weighted day change × peak starts ÷ working days — that is the overall duration effect on required fleet.</p>`
+    : "";
   return `
     <h2>Hire duration — stock staying out</h2>
-    <p class="muted">Weighted by each customer’s peak-month units of this item (LM × qty/m), so large clients move the signal. Compared on the same customer × product set as ${esc(priorLabel)}. Extra held = this month’s starts × change in days ÷ working days (${dur.workingDays || "—"}) — stock that does not come back to install again.</p>
+    <p class="muted">Weighted by each customer’s peak-month units of this item (LM × qty/m), so large clients move the signal. Compared on the same customer × product set as ${esc(priorLabel)}. Peak contracts and metres are that builder’s forecast in the peak-starts month. Extra held = this month’s starts × change in days ÷ working days (${dur.workingDays || "—"}) — stock that does not come back to install again.</p>
     <div class="cards">
       ${kpiCard("Weighted days now", daysf(dur.compared != null ? dur.compared : dur.current), "", TIPS.weightedDays, tone)}
       ${kpiCard(priorLabel + " weighted", daysf(dur.prior), "", TIPS.priorWeighted)}
@@ -1358,20 +1390,21 @@ function durationBlock(d) {
     <div class="why ${tone === "warn" ? "card warn" : tone === "good" ? "card good" : ""}">
       <p>${impact}</p>
     </div>
-    <div class="split">
+    <div class="split duration-tables">
       <div>
         <h2>Lengthening — increases the ask</h2>
         <div class="table-wrap" style="max-height:none">
-          <table>${moverHead}<tbody>${moverRows(dur.longer)}</tbody></table>
+          <table>${moverHead}<tbody>${moverRows(dur.longer)}</tbody>${moverFoot(dur.longerAll)}</table>
         </div>
       </div>
       <div>
         <h2>Shortening — eases the ask</h2>
         <div class="table-wrap" style="max-height:none">
-          <table>${moverHead}<tbody>${moverRows(dur.shorter)}</tbody></table>
+          <table>${moverHead}<tbody>${moverRows(dur.shorter)}</tbody>${moverFoot(dur.shorterAll)}</table>
         </div>
       </div>
-    </div>`;
+    </div>
+    ${netLine}`;
 }
 
 function mergePoMonths(months, conversion) {

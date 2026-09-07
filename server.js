@@ -289,6 +289,7 @@ function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, p
     for (const rec of info.rows) {
       const outLm = sfForecastLm(rec, peakIdx);
       if (outLm <= 0) continue;
+      const hires = sfNum(rec, `Forecast Month${peakIdx}_NoOfHires`);
       const units = outLm * p.rate;
       const days = num(rec.CompanyProduct_cv_AvgDays);
       if (days <= 0) continue;
@@ -313,6 +314,8 @@ function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, p
             days,
             priorDays,
             delta,
+            hires,
+            outLm,
             units,
             extraUnits: units * (delta / priorDays),
           });
@@ -338,8 +341,8 @@ function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, p
   const extraUnits = delta != null && wd > 0 ? (peak.outUnits || 0) * (delta / wd) : 0;
   let direction = "stable";
   if (delta != null && Math.abs(delta) >= 0.5) direction = delta > 0 ? "longer" : "shorter";
-  const longer = movers.filter((m) => m.delta > 0).sort((a, b) => b.extraUnits - a.extraUnits).slice(0, 8);
-  const shorter = movers.filter((m) => m.delta < 0).sort((a, b) => a.extraUnits - b.extraUnits).slice(0, 8);
+  const allLonger = movers.filter((m) => m.delta > 0).sort((a, b) => b.extraUnits - a.extraUnits);
+  const allShorter = movers.filter((m) => m.delta < 0).sort((a, b) => a.extraUnits - b.extraUnits);
   return {
     priorMonth: priorMonthId,
     current,
@@ -353,8 +356,34 @@ function buildDurationSignal({ products, productIndex, priorIx, peakIdx, peak, p
     comparedUnits: wPrior,
     workingDays: wd,
     byProduct,
-    longer,
-    shorter,
+    longer: allLonger.slice(0, 8),
+    shorter: allShorter.slice(0, 8),
+    longerAll: summariseDurationMovers(allLonger),
+    shorterAll: summariseDurationMovers(allShorter),
+  };
+}
+
+function summariseDurationMovers(rows) {
+  let units = 0;
+  let extra = 0;
+  let wDelta = 0;
+  let hires = 0;
+  let outLm = 0;
+  for (const m of rows || []) {
+    const u = Number(m.units) || 0;
+    units += u;
+    extra += Number(m.extraUnits) || 0;
+    wDelta += (Number(m.delta) || 0) * u;
+    hires += Number(m.hires) || 0;
+    outLm += Number(m.outLm) || 0;
+  }
+  return {
+    n: (rows || []).length,
+    units,
+    extraUnits: extra,
+    hires,
+    outLm,
+    delta: units ? wDelta / units : 0,
   };
 }
 
@@ -464,7 +493,7 @@ function computeItemMonths(rawItem, state, monthMeta, productIndex, priorRates, 
   const peak = trajectory.reduce((a, b) => (b.outUnits > a.outUnits ? b : a), trajectory[0] || { index: 1, outUnits: 0 });
   const buyMonth = trajectory.find((m) => m.index === BUY_INDEX) || trajectory[trajectory.length - 1];
   const buyIs = buyMonth ? buyMonth.projectedInService : item.inService;
-  const peakIs = peak && peak.projectedInService != null ? peak.projectedInService : item.forecastMax;
+  const peakIs = item.forecastMax || (peak && peak.projectedInService) || buyIs;
   applyAskFields(item, buyIs, peakIs);
   item.peakMonthKey = peak.date ? String(peak.date).slice(0, 7) : "";
   item.buyMonthKey = buyMonth && buyMonth.date ? String(buyMonth.date).slice(0, 7) : "";
@@ -1116,7 +1145,7 @@ function attachBuyWindowAsks(state, month, items, rows) {
       const computed = computeItemMonths(it, state, monthMeta, productIndex, {}, monthCache);
       row.peakMonthKey = computed.item.peakMonthKey || "";
       row.buyMonthKey = computed.item.buyMonthKey || buyKey;
-      applyAskFields(row, computed.buyIs, computed.peakIs != null ? computed.peakIs : row.forecastMax);
+      applyAskFields(row, computed.buyIs, row.forecastMax || computed.peakIs || computed.buyIs);
     }
   } catch {
     for (const row of rows || []) applyAskFields(row, row.forecastMax, row.forecastMax);
